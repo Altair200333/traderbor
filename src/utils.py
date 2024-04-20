@@ -98,6 +98,20 @@ def subtract_time(date, days=0, months=0, hours=0):
     return date
 
 
+def add_time(date, days=0, months=0, hours=0):
+    """Subtract days or months from a given datetime object"""
+    date = convert_to_datetime(date)
+
+    if hours:
+        date += relativedelta(hours=hours)
+    if days:
+        date += timedelta(days=days)
+    if months:
+        date += relativedelta(months=months)
+
+    return date
+
+
 def get_timestamp(date):
     """
     Convert anything into timestamp
