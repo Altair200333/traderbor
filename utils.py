@@ -1,6 +1,7 @@
 import re
 import base64
 import requests
+import io
 
 
 def is_url(val: str):
@@ -8,7 +9,7 @@ def is_url(val: str):
 
 
 def is_base64(val: str):
-    return re.search(r"^data:image\/(png|jpg|jpeg);base64", val) is not None
+    return re.search(r"^data:image\/(.*);base64", val) is not None
 
 
 def fetch_content(url):
@@ -41,3 +42,14 @@ def get_image_url(img):
     if is_base64(img):
         return img
     raise Exception("Invalid image")
+
+
+def plt_to_base64(plt, close=True):
+    stream = io.BytesIO()
+    plt.savefig(stream, format="png", bbox_inches="tight")
+
+    if close == True:
+        plt.close()
+
+    encoded = base64.b64encode(stream.getvalue()).decode("utf-8").replace("\n", "")
+    return "data:image/png;base64," + encoded
