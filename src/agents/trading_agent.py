@@ -115,7 +115,7 @@ class TradingAgent:
             ai_client.make_msg(
                 text=f"""This is price charts of {coin} coin, you need to come up with optimal strategy at this moment. 
                 Permorm price, signal and trend analisys of this graph of this crypto coin. Explain your decisons.
-                Avoid spending all money in one deal and develop a smart strategy.
+                Spend at most 20% of your budget in a single deal.
 
                 Latest price: {current_price}
                 """,
