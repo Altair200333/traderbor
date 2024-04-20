@@ -1,5 +1,5 @@
 from openai import OpenAI
-from const import *
+from src.const import *
 
 
 class ApiClient:
@@ -21,12 +21,7 @@ class ApiClient:
             print("Failed to generate: " + str(error))
             return ""
 
-    def make_msg(
-        self,
-        role,
-        text=None,
-        img=None,
-    ):
+    def make_msg(self, text=None, img=None, role=ROLE_USER):
         if img is None:
             return {"role": role, "content": text}
 
