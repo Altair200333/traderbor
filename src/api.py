@@ -60,3 +60,6 @@ class ApiClient:
             "role": role,
             "content": content,
         }
+
+
+ai_client = ApiClient()
