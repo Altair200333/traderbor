@@ -1,4 +1,5 @@
 from openai import OpenAI
+from const import *
 
 
 class ApiClient:
@@ -6,12 +7,13 @@ class ApiClient:
         self.client = OpenAI()
         self.model = "gpt-4-turbo"
 
-    def create(self, messages):
+    def create(self, messages, format="text", tokens=DEFAULT_TOKEN_LIMIT):
         try:
             completion = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                max_tokens=4000,
+                max_tokens=tokens,
+                response_format={"type": format},
             )
 
             return completion.choices[0].message.content
@@ -19,7 +21,12 @@ class ApiClient:
             print("Failed to generate: " + str(error))
             return ""
 
-    def make_msg(self, role, text=None, img=None):
+    def make_msg(
+        self,
+        role,
+        text=None,
+        img=None,
+    ):
         if img is None:
             return {"role": role, "content": text}
 
