@@ -44,12 +44,18 @@ def get_image_url(img):
     raise Exception("Invalid image")
 
 
+def buf_to_base64(buf):
+    """Convert buffer (i.e. BytesIO) to base64 image string. (you better make sure it is an image)"""
+    encoded = base64.b64encode(buf.getvalue()).decode("utf-8").replace("\n", "")
+    return "data:image/png;base64," + encoded
+
+
 def plt_to_base64(plt, close=True):
+    """After calling plt.plot(), scatter() ... etc, you can pass plt instance here and it will generate base64 image of your plot"""
     stream = io.BytesIO()
     plt.savefig(stream, format="png", bbox_inches="tight")
 
     if close == True:
         plt.close()
 
-    encoded = base64.b64encode(stream.getvalue()).decode("utf-8").replace("\n", "")
-    return "data:image/png;base64," + encoded
+    return buf_to_base64(stream)

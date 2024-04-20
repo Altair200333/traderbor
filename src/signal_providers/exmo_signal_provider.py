@@ -30,6 +30,7 @@ class ExmoProvider:
 
         response = requests.get(url, params=params)
         if response.status_code == 200:
-            return response.json()
+            data = response.json()
+            return data["candles"]
         else:
             return response.status_code, response.text
