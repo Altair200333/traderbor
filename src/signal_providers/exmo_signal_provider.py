@@ -1,4 +1,5 @@
 import requests
+from src.utils import *
 
 
 class ExmoProvider:
@@ -19,6 +20,8 @@ class ExmoProvider:
         coin: coin of interest (BTC, ETH, TON etc)
         price: second coin of pair (usually usdt)
         """
+        start_date = get_timestamp(start_date)
+        end_date = get_timestamp(end_date)
 
         url = self.url + "/candles_history"
         params = {

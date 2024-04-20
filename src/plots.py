@@ -6,8 +6,10 @@ import io
 
 # Your data
 
+DEFAULT_FIG_SHAPE = (16, 8)
 
-def make_candlebars(candles, useBuf=False):
+
+def make_candlebars(candles, useBuf=False, size=DEFAULT_FIG_SHAPE):
     """
     Pass candlebars data here, seems more or less standard format is: { t, o, c, h, l, v} - values;
     t - timestamp, o, c, h, l, v = open, close, high, low, volume
@@ -33,7 +35,9 @@ def make_candlebars(candles, useBuf=False):
         volume="in",
         ohlc="i",
     )
-    s = mpf.make_mpf_style(base_mpl_style="seaborn-v0_8-pastel", marketcolors=mc)
+    s = mpf.make_mpf_style(
+        base_mpl_style="seaborn-v0_8-pastel", marketcolors=mc, gridstyle="-"
+    )
 
     args = {
         "type": "candle",
@@ -41,7 +45,7 @@ def make_candlebars(candles, useBuf=False):
         "ylabel": "Price",
         "volume": True,
         "ylabel_lower": "Volume",
-        "figratio": (10, 8),
+        "figratio": size,
         "figscale": 1.2,
     }
 

@@ -2,6 +2,9 @@ import re
 import base64
 import requests
 import io
+from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
+import asyncio
 
 
 def is_url(val: str):
@@ -59,3 +62,57 @@ def plt_to_base64(plt, close=True):
         plt.close()
 
     return buf_to_base64(stream)
+
+
+def convert_to_datetime(date):
+    """Convert from human-readable date to datetime object"""
+    if isinstance(date, datetime):
+        return date
+    if isinstance(date, float) or isinstance(date, int):
+        return datetime.fromtimestamp(date)
+
+    if len(date) > 10:  # If there's more than just the date
+        date_format = "%Y-%m-%d %H:%M"
+    else:
+        date_format = "%Y-%m-%d"
+
+    return datetime.strptime(date, date_format)
+
+
+def get_current_datetime():
+    """Get current datetime"""
+    return datetime.now()
+
+
+def subtract_time(date, days=0, months=0, hours=0):
+    """Subtract days or months from a given datetime object"""
+    date = convert_to_datetime(date)
+
+    if hours:
+        date -= relativedelta(hours=hours)
+    if days:
+        date -= timedelta(days=days)
+    if months:
+        date -= relativedelta(months=months)
+
+    return date
+
+
+def get_timestamp(date):
+    """
+    Convert anything into timestamp
+    supports: datetime, timestamp, string date
+    """
+    if isinstance(date, datetime):
+        ts = date.timestamp()
+    if isinstance(date, float) or isinstance(date, int):
+        ts = date
+    if isinstance(date, str):
+        ts = convert_to_datetime(date).timestamp()
+
+    return int(ts)
+
+
+async def map_async(*mappers):
+    print(mappers)
+    return await asyncio.gather(*[fn for fn in mappers])
