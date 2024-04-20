@@ -13,7 +13,13 @@ class NewsApi:
         source = pydash.get(item, "source.name") or "unknown"
         title = pydash.get(item, "title") or "unknown"
         description = pydash.get(item, "description") or "unknown"
-        return {"source": source, "title": title, "description": description}
+        date = pydash.get(item, "publishedAt") or "unknown"
+        return {
+            "source": source,
+            "title": title,
+            "description": description,
+            "date": date,
+        }
 
     def _format_date(self, date):
         f_date = convert_to_datetime(date)
