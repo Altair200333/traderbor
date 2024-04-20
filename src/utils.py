@@ -35,7 +35,7 @@ def fetch_image_as_base64(url):
         response.raise_for_status()
 
 
-def get_image_url(img):
+def get_image_url(img: str):
     if is_url(img):
         # in case of internet image fetch it externally and pass as base64
         return fetch_image_as_base64(img)

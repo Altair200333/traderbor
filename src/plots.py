@@ -2,15 +2,16 @@ import matplotlib.pyplot as plt
 import mplfinance as mpf
 import pandas as pd
 from datetime import datetime
+import io
 
 # Your data
 
 
-def make_candlebars(candles, buf=None):
+def make_candlebars(candles, useBuf=False):
     """
     Pass candlebars data here, seems more or less standard format is: { t, o, c, h, l, v} - values;
     t - timestamp, o, c, h, l, v = open, close, high, low, volume
-    ngl - 90% gpt4 generated plotting code
+    returns BytesIO with figure if `useBuf` us True, None otherwise
     """
 
     data = {"candles": candles}
@@ -44,6 +45,8 @@ def make_candlebars(candles, buf=None):
         "figscale": 1.2,
     }
 
+    buf = io.BytesIO() if useBuf is True else None
+
     if buf is not None:
         args["savefig"] = buf
 
@@ -52,3 +55,5 @@ def make_candlebars(candles, buf=None):
         df,
         **args,
     )
+
+    return buf
