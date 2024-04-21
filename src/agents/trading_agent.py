@@ -110,11 +110,11 @@ class TradingAgent:
             ai_client.make_msg(
                 text=f"""Decise best actions in the market. 
                 
-                Do not buy on more then 50% of what you have, distribute spendings.
+                Do not buy on big fractions pf your budged, distribute spendings.
                 
                 Analyze current market conditions and respond with a structured JSON output that includes:
                 {{
-                    'trend_analysis': "Prediction of short and long-term market movements based on price history.",
+                    'trend_analysis': "Detailed prediction of short and long-term market movements based on price history.",
                     'technical_analysis': "Insights from visual technical analysis including relevant trading indicators.",
                     
                     'profits_on_sell': 'Calculate profits or loss in usdt if sold X amount of {coin} now. Show calculation process', 
@@ -132,7 +132,7 @@ class TradingAgent:
                 
                 example output:
                 {{
-                    'trend_analysis': <some analysis includin news and trends from charts>,
+                    'trend_analysis': <some analysis including news and trends from charts>,
                     'technical_analysis': <investigation of indicators and volumes>,
                   
                     'price': "{current_price}",
