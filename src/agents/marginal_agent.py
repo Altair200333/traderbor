@@ -20,6 +20,7 @@ class MarginalAgent:
         year_data=None,
         operations_history=None,
         current_balance=None,
+        leverage="1x",
         verbose=False,
     ):
         latest_data = day_data or week_data or month_data or year_data
@@ -108,7 +109,8 @@ class MarginalAgent:
             ai_client.make_msg(
                 text=f"""Decise best actions in the market. Take your tading history into account. 
 
-                Decide what to do in futures trading: set futures with stop-loss and take-profit or just wait.
+                Decide what to do in futures trading: set futures with stop-loss and take-profit or just wait. Consider short term (within hour) deals only
+                You can utilize up to {leverage} leverage.
                 
                 Analyze current market conditions and respond with a structured JSON output that includes:
                 {{
@@ -123,9 +125,12 @@ class MarginalAgent:
                     'decision_process': "Compare profits or setting each type of limit or waiting, and pick the best at the moment",
                     
                     'final_decision': "should be one of: 'buy', 'sell', 'hold' kind of futures",
+                    
                     'price': "price to open futures",
                     'stop_loss': "stop loss price",
-                    'take_profit': "take profit price"
+                    'take_profit': "take profit price",
+                    'leverage': "leverage to take, can be from 1x up to {leverage}",
+                    'amount': 'amount of coin to put into futures based on current balance'
                 }}
                 
                 example output:
@@ -145,7 +150,9 @@ class MarginalAgent:
                     
                     'price': "price to open futures",
                     'stop_loss': "stop loss price",
-                    'take_profit': "take profit price"
+                    'take_profit': "take profit price",
+                    'leverage': "leverage to take",
+                    'amount': 'amount of coin in the deal'
                 }}
                 field names are case sensitive!
                 """,
