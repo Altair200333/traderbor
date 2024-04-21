@@ -20,6 +20,7 @@ class TradingAgent:
         operations_history=None,
         current_balance=None,
         verbose=False,
+        goal="3k$",
     ):
         latest_data = day_data or week_data or month_data or year_data
         if not latest_data:
@@ -34,25 +35,19 @@ class TradingAgent:
 
         messages = [
             ai_client.make_msg(
-                """You are professional trader.
-            You have deep knowledge of cryptocurrencies and trading markets, and you can maximize profits the most efficiently.
-            You trade in USDT.
-            
-            You an only buy or sell at the current price, you can not set stop loss.
-            Avoid spending all money in one deal, play smart.
-            
-            Respond with json of this format: 
-            {
-                'description': what you see on charts, general short and long term trends, 
-                'trend_analysys': rough prediction of near future development of coin,
-                'techical_analysys': visual technical analysis of plot and indicators,
-                'optimal_strategy": optimal trading strategy to maximize profits in this situation,
-                'final_decision': what to do, possible variants: 'sell', 'buy', 'hold' (do nothing),
-                'amount': amount of coin to buy or sell, 0 if action is 'hold'
-                'usdt_amount': usdt equivalent of amount field based on current price,
-                'price': price of coin at this deal
-            }
-            """,
+                f"""You are professional trader with an extensive understanding of cryptocurrency markets. 
+                
+                Respond with JSON of descrived format
+                Guidelines:
+                - Do not buy on everything you have, distribute spendings!
+                - Feel free to sell all if selling improves total net_worth of acccount
+                - Consider historical market data and recent news.
+                - Use only money from your 'balance'
+                - Never close deals resulting in negative balance
+                - Never sell if you will loose money after it
+                
+                Your ultimate goal is to make {goal}
+                """,
                 role=ROLE_SYSTEM,
             ),
         ]
@@ -60,7 +55,7 @@ class TradingAgent:
         if day_buf:
             messages.append(
                 ai_client.make_msg(
-                    text="This is price history of this coin in the last day",
+                    text=f"This is price history of this coin in the last day. Current price: {current_price}",
                     img=day_buf,
                 ),
             )
@@ -92,32 +87,68 @@ class TradingAgent:
         if news:
             messages.append(
                 ai_client.make_msg(
-                    text=f"""This is news related to this coin ({coin}) from the last week: {news}""",
+                    text=f"""This is news relevant news and sentiment avout {coin}: '''{news}'''""",
                 ),
             )
 
         if operations_history:
             messages.append(
                 ai_client.make_msg(
-                    text=f"""Use data about previos operations to create better strategy.
-                    History of operations with this coin: {str(operations_history)}""",
+                    text=f"""This is your trading history with this coin: {str(operations_history)}.
+                    Use it to understand profitable deals""",
                 ),
             )
 
         if current_balance:
             messages.append(
                 ai_client.make_msg(
-                    text=f"""your current funds: {str(current_balance)}""",
+                    text=f"""Your current balance: {str(current_balance)}. You can only use money that you have""",
                 ),
             )
 
         messages.append(
             ai_client.make_msg(
-                text=f"""This is price charts of {coin} coin, you need to come up with optimal strategy at this moment. 
-                Permorm price, signal and trend analisys of this graph of this crypto coin. Explain your decisons.
-                Spend at most 20% of your budget in a single deal.
+                text=f"""Decise best actions in the market. 
+                
+                Do not buy on more then 50% of what you have, distribute spendings.
+                
+                Analyze current market conditions and respond with a structured JSON output that includes:
+                {{
+                    'trend_analysis': "Prediction of short and long-term market movements based on price history.",
+                    'technical_analysis': "Insights from visual technical analysis including relevant trading indicators.",
+                    
+                    'profits_on_sell': 'Calculate profits or loss in usdt if sold X amount of {coin} now. Show calculation process', 
+                    'profits_on_buy': 'Calculate profits or loss if buying amount X of coin right now. do not buy "on high"', 
+                    'profits_on_hold': 'Explain why waiting at this point in market can be preferable',
+                    
+                    'decision_process': "Compare profits or selling, buying or holding right now, and pick the best at the moment",
+                    
+                    'final_decision': "should be one of: 'buy', 'sell', 'hold'",
 
-                Latest price: {current_price}
+                    'price': "same as {current_price}",
+                    'amount': "Amount of coin to trade, 0 if holding.",
+                    'usdt_amount': "USDT amount in transaction, based on the current price.",
+                }}
+                
+                example output:
+                {{
+                    'trend_analysis': <some analysis includin news and trends from charts>,
+                    'technical_analysis': <investigation of indicators and volumes>,
+                  
+                    'price': "{current_price}",
+  
+                    'profits_on_sell': <Selling amount X would result in profilt Y which will increase net worth by N usdt, Balance after operation: {coin}: M, USDT: M>, 
+                    'profits_on_buy': <Buying at this level amount X would allow us to sell it at Z or higher because..., Balance after operation: {coin}: M, USDT: M>, 
+                    'profits_on_hold': <Holding right now is/is not becase market is ...>,
+                    
+                    'decision_process': <...comparing options...> and the best now is to <action_name>,
+                    
+                    'final_decision': <action_name>,
+
+                    'amount': "X",
+                    'usdt_amount': "Y",
+                }}
+                field names are case sensitive!
                 """,
             ),
         )
