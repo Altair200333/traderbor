@@ -20,7 +20,7 @@ class ApiClient:
 
             return completion.choices[0].message.content
         except Exception as error:
-            print("Failed to generate: " + str(error))
+            print("Failed to generate: " + str(error), messages)
             return ""
 
     def _prepare_image(self, img):

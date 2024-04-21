@@ -5,3 +5,4 @@ DEFAULT_TOKEN_LIMIT = 3000
 
 ROLE_USER = "user"
 ROLE_SYSTEM = "system"
+ROLE_ASSISTANT = "assistant"

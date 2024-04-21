@@ -1,6 +1,7 @@
 from src.agents.news_filtering_agent import *
 from src.plots import make_candlebars
 from src.api import *
+from src.const import *
 
 
 class TradingAgent:
@@ -37,7 +38,7 @@ class TradingAgent:
             ai_client.make_msg(
                 f"""You are professional trader with an extensive understanding of cryptocurrency markets. 
                 
-                Respond with JSON of descrived format
+                Respond with JSON of described format
                 Guidelines:
                 - Do not buy on everything you have, distribute spendings!
                 - Feel free to sell all if selling improves total net_worth of acccount
@@ -108,9 +109,9 @@ class TradingAgent:
 
         messages.append(
             ai_client.make_msg(
-                text=f"""Decise best actions in the market. 
+                text=f"""Decise best actions in the market. Take your tading history into account. 
                 
-                Do not buy on big fractions pf your budged, distribute spendings.
+                Do not buy on big fractions of your budged, distribute spendings.
                 
                 Analyze current market conditions and respond with a structured JSON output that includes:
                 {{
@@ -157,4 +158,9 @@ class TradingAgent:
             print(messages)
 
         response = ai_client.create(messages, format=JSON_MODE)
-        return response
+
+        messages.append(
+            ai_client.make_msg(text=response, role=ROLE_ASSISTANT),
+        )
+
+        return response, messages
