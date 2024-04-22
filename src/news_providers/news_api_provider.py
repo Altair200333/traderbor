@@ -25,7 +25,7 @@ class NewsApi:
         f_date = convert_to_datetime(date)
         return f_date.strftime("%Y-%m-%d")
 
-    def get_news(self, query, start_date=None, end_date=None, sort_by="relevancy"):
+    def get_news(self, coin, start_date=None, end_date=None, sort_by="relevancy"):
         """
         Fetch news articles based on a query from a specific date, sorted by a criterion.
 
@@ -35,7 +35,7 @@ class NewsApi:
         """
 
         params = {
-            "q": query,
+            "q": coin,
             "sortBy": sort_by,
             "apiKey": self.api_key,
         }
