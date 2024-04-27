@@ -1,8 +1,9 @@
 from src.signal_providers.exmo_signal_provider import ExmoProvider
+from src.signal_providers.bybit_signal_provider import BybitProvider
 from src.utils import *
 
 
-global_signal_provider = ExmoProvider()
+global_signal_provider = BybitProvider()
 
 
 def get_day_history(coin, end_date=None):

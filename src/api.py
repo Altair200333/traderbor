@@ -39,9 +39,11 @@ class ApiClient:
         return plt_to_base64(img)
 
     def make_msg(self, text=None, img=None, role=ROLE_USER):
+        # if it is text only message use simple format
         if img is None:
             return {"role": role, "content": text}
 
+        # compose multimodal message otherwise
         content = []
         if text is not None:
             content.append({"type": "text", "text": text})

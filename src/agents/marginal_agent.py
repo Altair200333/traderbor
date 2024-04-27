@@ -110,7 +110,6 @@ class MarginalAgent:
                 text=f"""Decise best actions in the market. Take your tading history into account. 
 
                 Decide what to do in futures trading: set futures with stop-loss and take-profit or just wait.
-                Consider only deals that will close in less then an hour.
                 You can utilize up to {leverage} leverage.
                 
                 Analyze current market conditions and respond with a structured JSON output that includes:
