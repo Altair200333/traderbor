@@ -36,7 +36,7 @@ class MarginalAgent:
 
         messages = [
             ai_client.make_msg(
-                f"""You are professional futures trader with an extensive understanding of cryptocurrency markets. 
+                f"""You are professional day trader with an extensive understanding of cryptocurrency markets. 
                 
                 Respond with JSON of described format.
                 Guidelines:
