@@ -130,3 +130,11 @@ def get_timestamp(date):
 async def map_async(*mappers):
     print(mappers)
     return await asyncio.gather(*[fn for fn in mappers])
+
+
+def get_t(v, low, high):
+    return (v - low) / (high - low)
+
+
+def clamp(v, low, high):
+    return min(max(v, low), high)
