@@ -5,6 +5,7 @@ import io
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 
 def is_url(val: str):
@@ -127,9 +128,21 @@ def get_timestamp(date):
     return int(ts)
 
 
-async def map_async(*mappers):
-    print(mappers)
-    return await asyncio.gather(*[fn for fn in mappers])
+def map_async(*fns):
+    max_workers = 10
+
+    executors_list = []
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for fn in fns:
+            executors_list.append(executor.submit(fn))
+
+    results = []
+
+    for x in executors_list:
+        results.append(x.result())
+
+    return results
 
 
 def get_t(v, low, high):
