@@ -10,8 +10,8 @@ class BybitBidAskProvider:
         bid = data["result"]["b"]
         ask = data["result"]["a"]
 
-        b = [{"price": float(x[0]), "amount": float(x[1])} for x in bid]
-        a = [{"price": float(x[0]), "amount": float(x[1])} for x in ask]
+        b = [{"price": float(x[0]), "amount": float(x[1]) * float(x[0])} for x in bid]
+        a = [{"price": float(x[0]), "amount": float(x[1]) * float(x[0])} for x in ask]
 
         return {"bid": b, "ask": a}
 
