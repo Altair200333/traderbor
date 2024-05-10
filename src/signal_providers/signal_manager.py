@@ -6,6 +6,15 @@ from src.utils import *
 global_signal_provider = BybitProvider()
 
 
+def get_12h_history(coin, end_date=None):
+    end_date = end_date or get_current_datetime()
+    start_date = subtract_time(end_date, hours=12)
+
+    return global_signal_provider.get_history(
+        coin, start_date=start_date, end_date=end_date, resolution="5"
+    )
+
+
 def get_day_history(coin, end_date=None):
     end_date = end_date or get_current_datetime()
     start_date = subtract_time(end_date, hours=24)

@@ -10,10 +10,34 @@ class MarginalAgent:
     def __init__(self):
         pass
 
+    def _make_buf(self, data):
+        return make_candlebars(data, useBuf=True) if data else None
+
+    def _append_messages(self, messages, images):
+        for item in images:
+            description = item["text"]
+            img = item["img"] if "img" in item else None
+            data = item["data"] if "data" in item else None
+            if img:
+                buf = self._make_buf(img)
+                messages.append(
+                    ai_client.make_msg(
+                        text=description,
+                        img=buf,
+                    ),
+                )
+            elif data:
+                messages.append(
+                    ai_client.make_msg(
+                        text=f"{description}. {str(data)}",
+                    ),
+                )
+
     def decide(
         self,
         coin,
         news=None,
+        day_12h_data=None,
         day_data=None,
         week_data=None,
         month_data=None,
@@ -23,20 +47,15 @@ class MarginalAgent:
         leverage="1x",
         verbose=False,
     ):
-        latest_data = day_data or week_data or month_data or year_data
+        latest_data = day_12h_data or day_data or week_data or month_data or year_data
         if not latest_data:
             raise Exception("Provide at least some historical data")
 
         current_price = latest_data[-1]["c"]
 
-        day_buf = make_candlebars(day_data, useBuf=True) if day_data else None
-        week_buf = make_candlebars(week_data, useBuf=True) if week_data else None
-        month_buf = make_candlebars(month_data, useBuf=True) if month_data else None
-        year_buf = make_candlebars(year_data, useBuf=True) if year_data else None
-
         messages = [
             ai_client.make_msg(
-                f"""You are professional day trader with an extensive understanding of cryptocurrency markets. 
+                f"""You are professional momentum trader with an extensive understanding of cryptocurrency markets. 
                 
                 Respond with JSON of described format.
                 Guidelines:
@@ -51,59 +70,43 @@ class MarginalAgent:
             ),
         ]
 
-        if day_buf:
-            messages.append(
-                ai_client.make_msg(
-                    text=f"This is price history of this coin in the last day. Current price: {current_price}",
-                    img=day_buf,
-                ),
-            )
-
-        if week_buf:
-            messages.append(
-                ai_client.make_msg(
-                    text="This is price history of this coin in the last week",
-                    img=week_buf,
-                ),
-            )
-
-        if month_buf:
-            messages.append(
-                ai_client.make_msg(
-                    text="This is price history of this coin in the last month",
-                    img=month_buf,
-                ),
-            )
-
-        if year_buf:
-            messages.append(
-                ai_client.make_msg(
-                    text="This is price history of this coin in the last year",
-                    img=year_buf,
-                ),
-            )
-
-        if news:
-            messages.append(
-                ai_client.make_msg(
-                    text=f"""This is news relevant news and sentiment avout {coin}: '''{news}'''""",
-                ),
-            )
-
-        if operations_history:
-            messages.append(
-                ai_client.make_msg(
-                    text=f"""This is your trading history with this coin: {str(operations_history)}.
-                    Use it to understand profitable deals""",
-                ),
-            )
-
-        if current_balance:
-            messages.append(
-                ai_client.make_msg(
-                    text=f"""Your current balance: {str(current_balance)}. You can only use money that you have""",
-                ),
-            )
+        self._append_messages(
+            messages,
+            [
+                {
+                    "text": f"This is price history of this coin in the 12 hours. Current price: {current_price}",
+                    "img": day_12h_data,
+                },
+                {
+                    "text": f"This is price history of this coin in the last day.",
+                    "img": day_data,
+                },
+                {
+                    "text": f"This is price history of this coin in the last week.",
+                    "img": week_data,
+                },
+                {
+                    "text": f"This is price history of this coin in the last month.",
+                    "img": month_data,
+                },
+                {
+                    "text": f"This is price history of this coin in the last year.",
+                    "img": year_data,
+                },
+                {
+                    "text": f"This is news relevant news and sentiment about {coin}",
+                    "data": news,
+                },
+                {
+                    "text": f"This is your trading history with this coin:",
+                    "data": operations_history,
+                },
+                {
+                    "text": f"Your current balance, you can only use money that you have:",
+                    "data": current_balance,
+                },
+            ],
+        )
 
         messages.append(
             ai_client.make_msg(
@@ -118,13 +121,13 @@ class MarginalAgent:
                     'technical_analysis': "Insights from visual technical analysis including relevant trading indicators.",
                     'prediction': "Where do you think price can go".
                     
-                    'profits_on_sell': 'Calculate profits or loss in usdt if "buying" futures hits.',
-                    'profits_on_buy': 'Calculate profits or loss in usdt if "selling" futures hits.',
+                    'profits_on_long': 'Calculate profits or loss in usdt if going long',
+                    'profits_on_short': 'Calculate profits or loss in usdt if going short',
                     'profits_on_hold': 'Explain why waiting at this point in market can be preferable',
                     
                     'decision_process': "Compare profits or setting each type of limit or waiting, and pick the best at the moment",
                     
-                    'final_decision': "should be one of: 'buy', 'sell', 'hold' kind of futures",
+                    'final_decision': "should be one of: 'long', 'short', 'hold' kind of futures",
                     
                     'price': "price to open futures",
                     'stop_loss': "stop loss price",
@@ -140,13 +143,13 @@ class MarginalAgent:
                     'prediction': <rough prediction of price in short term>,
                     
   
-                    'profits_on_sell': <Opening "selling" futures at price X, take-profit Y and stop-loss Z would result in N% income or will close at M%>, 
-                    'profits_on_buy': <Opening "buying" futures at price X, take-profit Y and stop-loss Z would result in N% income or will close at M%>,
+                    'profits_on_long': <Opening "long" futures at price X, take-profit Y and stop-loss Z would result in N% income or will close at M%>, 
+                    'profits_on_short': <Opening "short" futures at price X, take-profit Y and stop-loss Z would result in N% income or will close at M%>,
                     'profits_on_hold': <Holding right now is/is not preferable because market is ...>,
                     
                     'decision_process': <...comparing options...> and the best now is to <action_name>,
                     
-                    'final_decision': <kind of futures, one of 'sell' 'buy' or 'hold'>,
+                    'final_decision': <kind of futures, one of 'long' 'short' or 'hold'>,
                     
                     'price': "price to open futures",
                     'stop_loss': "stop loss price",
