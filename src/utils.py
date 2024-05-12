@@ -151,3 +151,7 @@ def get_t(v, low, high):
 
 def clamp(v, low, high):
     return min(max(v, low), high)
+
+
+def in_range(v, v1, v2):
+    return v1 <= v <= v2 or v2 <= v <= v1

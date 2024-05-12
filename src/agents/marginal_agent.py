@@ -42,7 +42,6 @@ class MarginalAgent:
         week_data=None,
         month_data=None,
         year_data=None,
-        operations_history=None,
         current_balance=None,
         leverage="1x",
         verbose=False,
@@ -60,11 +59,10 @@ class MarginalAgent:
                 Respond with JSON of described format.
                 Guidelines:
                 - Do not buy on everything you have, distribute spendings!
-                - Feel free to sell all if selling improves total net_worth of acccount
-                - Consider historical market data and recent news.
+                - Consider historical market data and recent news
                 - Use only money from your 'balance'
                 
-                Your ultimate goal is to make make as much profit as possible
+                Your goal is to make make as much profit as possible
                 """,
                 role=ROLE_SYSTEM,
             ),
@@ -74,7 +72,7 @@ class MarginalAgent:
             messages,
             [
                 {
-                    "text": f"This is price history of this coin in the 12 hours. Current price: {current_price}",
+                    "text": f"This is price history of this coin in the 12 hours.",
                     "img": day_12h_data,
                 },
                 {
@@ -98,10 +96,6 @@ class MarginalAgent:
                     "data": news,
                 },
                 {
-                    "text": f"This is your trading history with this coin:",
-                    "data": operations_history,
-                },
-                {
                     "text": f"Your current balance, you can only use money that you have:",
                     "data": current_balance,
                 },
@@ -110,37 +104,16 @@ class MarginalAgent:
 
         messages.append(
             ai_client.make_msg(
-                text=f"""Decise best actions in the market. Take your tading history into account. 
+                text=f"""Decise best actions in the market following momentum trading strategy. Current price: {current_price}.
 
                 Decide what to do in futures trading: set futures with stop-loss and take-profit or just wait.
                 You can utilize up to {leverage} leverage.
                 
                 Analyze current market conditions and respond with a structured JSON output that includes:
                 {{
-                    'trend_analysis': "Detailed prediction of short and long-term market movements based on price history.",
-                    'technical_analysis': "Insights from visual technical analysis including relevant trading indicators.",
-                    'prediction': "Where do you think price can go".
-                    
-                    'profits_on_long': 'Calculate profits or loss in usdt if going long',
-                    'profits_on_short': 'Calculate profits or loss in usdt if going short',
-                    'profits_on_hold': 'Explain why waiting at this point in market can be preferable',
-                    
-                    'decision_process': "Compare profits or setting each type of limit or waiting, and pick the best at the moment",
-                    
-                    'final_decision': "should be one of: 'long', 'short', 'hold' kind of futures",
-                    
-                    'price': "price to open futures",
-                    'stop_loss': "stop loss price",
-                    'take_profit': "take profit price",
-                    'leverage': "leverage to take, can be from 1x up to {leverage}",
-                    'amount': 'amount of coin to put into futures based on current balance'
-                }}
-                
-                example output:
-                {{
-                    'trend_analysis': <some analysis including news and trends from charts>,
-                    'technical_analysis': <investigation of indicators and volumes>,
-                    'prediction': <rough prediction of price in short term>,
+                    'technical_analysis': <visual technical analysis including relevant trading indicators>,
+                    'trend_analysis': <detailed prediction of short and mid-term market movements based on price history>,
+                    'analysis': <analyse is there a momentum that can be used for momentum trading>,
                     
   
                     'profits_on_long': <Opening "long" futures at price X, take-profit Y and stop-loss Z would result in N% income or will close at M%>, 
@@ -155,7 +128,8 @@ class MarginalAgent:
                     'stop_loss': "stop loss price",
                     'take_profit': "take profit price",
                     'leverage': "leverage to take",
-                    'amount': 'amount of coin in the deal'
+                    'amount': 'amount of usd in the deal',
+                    'entry_price': 'price of entry for the order'
                 }}
                 field names are case sensitive!
                 """,

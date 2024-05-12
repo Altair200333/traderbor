@@ -16,7 +16,7 @@ class SupervisorMarginTrader:
 
         messages.append(
             ai_client.make_msg(
-                f"""Evaluate your prediction from different perspectives, does it make sence, is it going to be profitable, are calculations correct?
+                f"""Evaluate this decision, does it make sence, is it going to be profitable, are calculations correct?
                 If somethins is not right, update the original data with corrected values
                 Respond with the same json, but add several fields:
                 {{
