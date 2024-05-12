@@ -155,3 +155,10 @@ def clamp(v, low, high):
 
 def in_range(v, v1, v2):
     return v1 <= v <= v2 or v2 <= v <= v1
+
+
+def try_float(v):
+    try:
+        return float(v)
+    except:
+        return 0

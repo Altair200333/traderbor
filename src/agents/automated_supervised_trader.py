@@ -3,8 +3,10 @@ from src.agents.news_filtering_agent import NewsFilteringAgent
 from src.agents.supervisor_margin_trader import SupervisorMarginTrader
 from src.api import *
 from src.const import *
+from src.utils import *
 from src.news_providers.tradingview_provider import TradingViewProvider
 from src.signal_providers.signal_manager import *
+import json
 
 NEWS_ITEMS_LIMIT = 30
 
@@ -47,5 +49,11 @@ class AutomatedSupervisedTrader:
             leverage="1x",
             verbose=True,
         )
+
+        response = json.loads(response)
+        response["amount"] = try_float(response["amount"])
+        response["price"] = try_float(response["price"])
+        response["stop_loss"] = try_float(response["stop_loss"])
+        response["take_profit"] = try_float(response["take_profit"])
 
         return response, messages, day_history
