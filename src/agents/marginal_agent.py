@@ -129,7 +129,6 @@ class MarginalAgent:
                     'take_profit': "take profit price",
                     'leverage': "leverage to take",
                     'amount': 'amount of usd in the deal',
-                    'entry_price': 'price of entry for the order'
                 }}
                 field names are case sensitive!
                 """,
