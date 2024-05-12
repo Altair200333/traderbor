@@ -9,9 +9,10 @@ import random
 
 
 class RandomPredictor:
-    def __init__(self, trade_rate=0.03, amount_rate=0.3) -> None:
+    def __init__(self, trade_rate=0.03, tp_ratio=0.5, amount_rate=0.3) -> None:
         self.trade_rate = trade_rate
         self.amount_rate = amount_rate
+        self.tp_ratio = tp_ratio
 
     def decide(
         self,
@@ -38,11 +39,11 @@ class RandomPredictor:
         elif option == 2:
             action = "long"
             tp = current_price * (1.0 + self.trade_rate)
-            sl = current_price * (1.0 - self.trade_rate * 0.5)
+            sl = current_price * (1.0 - self.trade_rate * self.tp_ratio)
         elif option == 3:
             action = "short"
             tp = current_price * (1.0 - self.trade_rate)
-            sl = current_price * (1.0 + self.trade_rate * 0.5)
+            sl = current_price * (1.0 + self.trade_rate * self.tp_ratio)
 
         return (
             {

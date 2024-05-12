@@ -54,18 +54,22 @@ class TestingEngine:
         self,
         coin,
         agent,
+        balance,
         interval_h=INTERVAL_H,
         days_back=30,
     ) -> None:
         self.orders = []
-        self.balance = {"usdt": 0}
+        self.balance = balance
         self.logs = []
-        self.current_date = None
 
         self.interval_h = interval_h
         self.days_back = days_back
         self.coin = coin
         self.agent = agent
+
+        start_date = subtract_time(get_current_datetime(), days=self.days_back)
+
+        self.current_date = start_date
 
     def process_step(self):
         if self.balance["usdt"] < 100:
@@ -101,15 +105,7 @@ class TestingEngine:
 
         return history
 
-    def test(self, balance, steps=STEPS):
-        start_date = subtract_time(get_current_datetime(), days=self.days_back)
-
-        self.current_date = start_date
-        self.balance = balance
-
-        self.orders = []
-        self.logs = []
-
+    def test(self, steps=STEPS):
         for i in range(steps):
             self.logs.append(f"Start step {i}")
 
@@ -124,9 +120,9 @@ class TestingEngine:
                     tp_diff, sl_diff = calculate_adjustment(order)
 
                     if kind == "TP":
-                        balance["usdt"] += amount + tp_diff
+                        self.balance["usdt"] += amount + tp_diff
                     if kind == "SL":
-                        balance["usdt"] += amount + sl_diff
+                        self.balance["usdt"] += amount + sl_diff
 
                     self.logs.append(f"new balance {self.balance}")
                     del self.orders[idx]
