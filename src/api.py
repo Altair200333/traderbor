@@ -7,7 +7,7 @@ import io
 class ApiClient:
     def __init__(self):
         self.client = OpenAI()
-        self.model = "gpt-4-turbo"
+        self.model = "gpt-4o"
 
     def create(self, messages, format="text", tokens=DEFAULT_TOKEN_LIMIT):
         try:

@@ -36,7 +36,7 @@ class AutomatedSupervisedTrader:
             news=filtered_news,
             # day_12h_data=day_12h_history,
             day_data=day_history,
-            # week_data=week_history,
+            week_data=week_history,
             # year_data=year_history,
             # operations_history=operations_history,
             current_balance=balance,

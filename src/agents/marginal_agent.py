@@ -56,9 +56,8 @@ class MarginalAgent:
             ai_client.make_msg(
                 f"""You are professional momentum trader with an extensive understanding of cryptocurrency markets. 
                 
-                Respond with JSON of described format.
                 Guidelines:
-                - Do not buy on everything you have, distribute spendings!
+                - Distribute spendings, use at most 30% of your budget
                 - Consider historical market data and recent news
                 - Use only money from your 'balance'
                 
@@ -72,15 +71,15 @@ class MarginalAgent:
             messages,
             [
                 {
-                    "text": f"This is price history of this coin in the 12 hours.",
+                    "text": f"This is price history of {coin} coin in the 12 hours.",
                     "img": day_12h_data,
                 },
                 {
-                    "text": f"This is price history of this coin in the last day.",
+                    "text": f"This is price history of {coin} coin in the last day.",
                     "img": day_data,
                 },
                 {
-                    "text": f"This is price history of this coin in the last week.",
+                    "text": f"This is price history of {coin} coin in the last week.",
                     "img": week_data,
                 },
                 {
@@ -104,10 +103,26 @@ class MarginalAgent:
 
         messages.append(
             ai_client.make_msg(
-                text=f"""Decise best actions in the market following momentum trading strategy. Current price: {current_price}.
+                text=f"""Evaluate the price movement and possibility to enter momentum trading at this spot. Explain your reasoning process step-by step""",
+            ),
+        )
 
-                Decide what to do in futures trading: set futures with stop-loss and take-profit or just wait.
-                You can utilize up to {leverage} leverage.
+        response = ai_client.create(messages)
+
+        messages.append(
+            ai_client.make_msg(
+                text=f"""Evaluate the price movement and possibility to enter momentum trading at this spot. Explain your reasoning process step-by step""",
+            ),
+        )
+
+        # append first response here
+        messages.append(
+            ai_client.make_msg(text=response, role=ROLE_ASSISTANT),
+        )
+
+        messages.append(
+            ai_client.make_msg(
+                text=f"""Now based on this respond with this JSON:
                 
                 Analyze current market conditions and respond with a structured JSON output that includes:
                 {{
@@ -124,24 +139,25 @@ class MarginalAgent:
                     
                     'final_decision': <kind of futures, one of 'long' 'short' or 'hold'>,
                     
-                    'price': "price to open futures",
-                    'stop_loss': "stop loss price",
-                    'take_profit': "take profit price",
-                    'leverage': "leverage to take",
-                    'amount': 'amount of usd in the deal',
+                    'price': "price to open futures, must be float number",
+                    'stop_loss': "stop loss price, must be float number",
+                    'take_profit': "take profit price, must be float number",
+                    'amount': 'amount of usdt in the deal, must be float number',
                 }}
-                field names are case sensitive!
+                
+                make sure that you take_profit is always higher then stop_loss to secure profits and avoid losses.
+                field names are case sensitive! Respond with a valid JSON!
                 """,
             ),
         )
-
-        if verbose:
-            print(messages)
 
         response = ai_client.create(messages, format=JSON_MODE)
 
         messages.append(
             ai_client.make_msg(text=response, role=ROLE_ASSISTANT),
         )
+
+        if verbose:
+            print(messages)
 
         return response, messages

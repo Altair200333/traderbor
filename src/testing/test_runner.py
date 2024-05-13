@@ -7,7 +7,7 @@ def match_candle(order, candle):
     sl = order["stop_loss"]
 
     order_time = order["t"]
-    candle_time = candle["t"]
+    candle_time = candle["t"] / 1000.0
 
     if in_range(tp, candle["l"], candle["h"]) and candle_time > order_time:
         return True, "TP"
@@ -111,6 +111,8 @@ class TestingEngine:
 
             history = self.process_step()
 
+            orders_to_delete = []
+
             for idx, order in enumerate(self.orders):
                 matched, kind, candle_data = match_candle_list(order, history)
                 if matched:
@@ -119,7 +121,7 @@ class TestingEngine:
                     tp_diff, sl_diff = calculate_adjustment(order)
 
                     self.logs.append(
-                        f"MATCHED {str(order)} {kind} ; tp_diff: {tp_diff}, sl_diff: {sl_diff}"
+                        f"MATCHED {str(order)} {kind} ; tp_diff: {tp_diff}, sl_diff: {sl_diff}, candle {str(candle_data)}"
                     )
 
                     if kind == "TP":
@@ -128,6 +130,10 @@ class TestingEngine:
                         self.balance["usdt"] += amount + sl_diff
 
                     self.logs.append(f"new balance {self.balance}")
-                    del self.orders[idx]
+
+                    orders_to_delete.append(idx)
+            # Second pass: delete in reverse order.
+            for idx in sorted(orders_to_delete, reverse=True):
+                del self.orders[idx]
 
             self.current_date = add_time(self.current_date, hours=self.interval_h)

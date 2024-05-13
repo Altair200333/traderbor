@@ -161,4 +161,4 @@ def try_float(v):
     try:
         return float(v)
     except:
-        return 0
+        return -1
