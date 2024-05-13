@@ -115,9 +115,12 @@ class TestingEngine:
                 matched, kind, candle_data = match_candle_list(order, history)
                 if matched:
                     amount = order["amount"]
-                    self.logs.append(f"MATCHED {str(order)} {kind}")
 
                     tp_diff, sl_diff = calculate_adjustment(order)
+
+                    self.logs.append(
+                        f"MATCHED {str(order)} {kind} ; tp_diff: {tp_diff}, sl_diff: {sl_diff}"
+                    )
 
                     if kind == "TP":
                         self.balance["usdt"] += amount + tp_diff

@@ -17,13 +17,7 @@ class AutomatedSupervisedTrader:
         self.trading_agent = SupervisorMarginTrader()
         self.filtering_agent = NewsFilteringAgent()
 
-    def decide(
-        self,
-        coin,
-        balance,
-        use_news=False,
-        cutoff=None,
-    ):
+    def decide(self, coin, balance, use_news=False, cutoff=None, verbose=False):
         date_cutoff = cutoff if cutoff else get_current_datetime()
         filtered_news = None
         if use_news:
@@ -47,7 +41,7 @@ class AutomatedSupervisedTrader:
             # operations_history=operations_history,
             current_balance=balance,
             leverage="1x",
-            verbose=True,
+            verbose=verbose,
         )
 
         response = json.loads(response)

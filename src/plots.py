@@ -66,10 +66,11 @@ def make_candlebars(candles, useBuf=False, size=DEFAULT_FIG_SHAPE):
         "volume": True,
         # "ylabel": "Price",
         # "ylabel_lower": "Volume",
-        "addplot": apds,
-        "panel_ratios": (6, 3, 2),
+        # "addplot": apds,
+        # "panel_ratios": (6, 3, 2),
         "figratio": size,
-        "title": "Stock Data with MACD",
+        "title": "Price and 20 MAV",
+        "mav": 20,
     }
 
     buf = io.BytesIO() if useBuf is True else None

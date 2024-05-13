@@ -112,8 +112,8 @@ class MarginalAgent:
                 Analyze current market conditions and respond with a structured JSON output that includes:
                 {{
                     'technical_analysis': <visual technical analysis including relevant trading indicators>,
-                    'trend_analysis': <detailed prediction of short and mid-term market movements based on price history>,
-                    'analysis': <analyse is there a momentum that can be used for momentum trading>,
+                    'trend_analysis': <step by step analysis process of current price movement>,
+                    'analysis': <EVALUATE current entry point based on momentum, volume, indicators. perform STEP-BY-STEP analysys>,
                     
   
                     'profits_on_long': <Opening "long" futures at price X, take-profit Y and stop-loss Z would result in N% income or will close at M%>, 
