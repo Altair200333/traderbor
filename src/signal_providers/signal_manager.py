@@ -1,9 +1,10 @@
+from src.signal_providers.binance_signal_provider import BinanceProvider
 from src.signal_providers.exmo_signal_provider import ExmoProvider
 from src.signal_providers.bybit_signal_provider import BybitProvider
 from src.utils import *
 
 
-global_signal_provider = BybitProvider()
+global_signal_provider = BinanceProvider()
 
 
 def get_12h_history(coin, end_date=None):
