@@ -1,5 +1,5 @@
 from src.agents.trading_agent import TradingAgent
-from src.api import *
+from src.openai_api import *
 from src.const import *
 
 

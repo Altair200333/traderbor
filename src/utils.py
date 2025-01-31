@@ -1,3 +1,4 @@
+import json
 import re
 import base64
 import requests
@@ -167,3 +168,11 @@ def try_float(v):
         return float(v)
     except:
         return -1
+
+def pretty_print_json(json_str):
+    try:
+        parsed_json = json.loads(json_str)
+        pretty_json = json.dumps(parsed_json, indent=4)
+        print(pretty_json)
+    except Exception as e:
+        print("Error parsing JSON:", e)

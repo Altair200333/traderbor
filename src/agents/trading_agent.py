@@ -1,6 +1,6 @@
 from src.agents.news_filtering_agent import *
 from src.plots import make_candlebars
-from src.api import *
+from src.openai_api import *
 from src.const import *
 
 

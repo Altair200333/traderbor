@@ -1,5 +1,5 @@
 from src.agents.marginal_agent import MarginalAgent
-from src.api import *
+from src.openai_api import *
 from src.const import *
 
 

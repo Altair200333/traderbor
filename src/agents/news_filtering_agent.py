@@ -1,4 +1,4 @@
-from src.api import ai_client
+from src.openai_api import ai_client
 from src.const import *
 
 
