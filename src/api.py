@@ -3,12 +3,19 @@ from src.const import *
 from src.utils import *
 from openai import OpenAI
 
-class GenericApiClient:
+
+class BasicApiClient:
     def __init__(self, client=None, model="o1"):
         # Initializes with default OpenAI client if none provided,
         # and uses "o1" as the default model.
         self.client = client if client is not None else OpenAI()
         self.model = model
+
+    def is_reasoning_model(self):
+        reasoning_models = ["o1", "o1-2024-12-17", "o1-mini", "o1-mini-2024-09-12",
+                            "o1-preview", "o1-preview-2024-09-12", "o3-mini", "o3-mini-2025-01-31"]
+
+        return self.model in reasoning_models
 
     def create(self, messages, options=None):
         """
@@ -26,13 +33,17 @@ class GenericApiClient:
         opts = options or {}
         response_format = opts.get("format", TEXT_MODE)
         tokens = opts.get("tokens", DEFAULT_TOKEN_LIMIT)
+        reasoning_effort = opts.get("reasoning_effort", "high")
+
         try:
             completion = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 max_completion_tokens=tokens,
                 response_format={"type": response_format},
+                reasoning_effort=reasoning_effort if self.is_reasoning_model() else None,
             )
+
             return completion.choices[0].message.content
         except Exception as error:
             print("Failed to generate: " + str(error), messages)
@@ -52,7 +63,14 @@ class GenericApiClient:
             return get_image_url(img)
         return plt_to_base64(img)
 
+    def _make_role(self, role):
+        # in reasoning models, system is replaced with developer
+        if self.is_reasoning_model() and role == ROLE_SYSTEM:
+            return ROLE_DEVELOPER
+        return role
+
     def make_msg(self, text=None, img=None, role=ROLE_USER):
+        role = self._make_role(role)
         # For text-only messages, use a simple format.
         if img is None:
             return {"role": role, "content": text}
@@ -73,5 +91,3 @@ class GenericApiClient:
             )
 
         return {"role": role, "content": content}
-
-

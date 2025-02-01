@@ -56,7 +56,8 @@ def get_image_url(img: str):
 
 def buf_to_base64(buf):
     """Convert buffer (i.e. BytesIO) to base64 image string. (you better make sure it is an image)"""
-    encoded = base64.b64encode(buf.getvalue()).decode("utf-8").replace("\n", "")
+    encoded = base64.b64encode(buf.getvalue()).decode(
+        "utf-8").replace("\n", "")
     return "data:image/png;base64," + encoded
 
 
@@ -168,6 +169,7 @@ def try_float(v):
         return float(v)
     except:
         return -1
+
 
 def pretty_print_json(json_str):
     try:
