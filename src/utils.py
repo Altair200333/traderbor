@@ -76,9 +76,15 @@ def convert_to_datetime(date):
     """Convert from human-readable date to datetime object"""
     if isinstance(date, datetime):
         return date
-    if isinstance(date, float) or isinstance(date, int):
+    if isinstance(date, (float, int)):
         return datetime.fromtimestamp(date)
 
+    # Check if the date is in ISO 8601 format (e.g., "2025-01-31T10:24:11.518Z")
+    if "T" in date:
+        # Replace 'Z' with '+00:00' to support UTC offset
+        return datetime.fromisoformat(date.replace("Z", "+00:00"))
+
+    # Fallback for date strings without ISO formatting
     if len(date) > 10:  # If there's more than just the date
         date_format = "%Y-%m-%d %H:%M"
     else:
@@ -178,3 +184,15 @@ def pretty_print_json(json_str):
         print(pretty_json)
     except Exception as e:
         print("Error parsing JSON:", e)
+
+
+def compact(obj):
+    """
+    Recursively remove keys with None values from object
+    """
+    if isinstance(obj, dict):
+        return {key: compact(value) for key, value in obj.items() if value is not None}
+    elif isinstance(obj, list):
+        return [compact(item) for item in obj if item is not None]
+    else:
+        return obj

@@ -29,7 +29,7 @@ class TradingViewProvider:
             "date": str(convert_to_datetime(date)) if date else "unknown",
         }
 
-    def get_news(self, coin):
+    def get_news(self, coin, **args):
         params = {
             "lang": "en",
             "symbol": f"{self.source}:{coin}USDT",
@@ -43,5 +43,6 @@ class TradingViewProvider:
             return news
         else:
             raise Exception(
-                f"Failed to fetch news: {response.status_code} - {response.text}"
+                f"Failed to fetch news: {
+                    response.status_code} - {response.text}"
             )

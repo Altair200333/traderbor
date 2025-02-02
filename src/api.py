@@ -1,4 +1,6 @@
 import io
+
+import pydash
 from src.const import *
 from src.utils import *
 from openai import OpenAI
@@ -12,10 +14,7 @@ class BasicApiClient:
         self.model = model
 
     def is_reasoning_model(self):
-        reasoning_models = ["o1", "o1-2024-12-17", "o1-mini", "o1-mini-2024-09-12",
-                            "o1-preview", "o1-preview-2024-09-12", "o3-mini", "o3-mini-2025-01-31"]
-
-        return self.model in reasoning_models
+        return self.model.startswith("o1") or self.model.startswith("o3")
 
     def create(self, messages, options=None):
         """
@@ -35,15 +34,16 @@ class BasicApiClient:
         tokens = opts.get("tokens", DEFAULT_TOKEN_LIMIT)
         reasoning_effort = opts.get("reasoning_effort", "high")
 
+        params = {
+            "model": self.model,
+            "messages": messages,
+            "max_completion_tokens": tokens,
+            "response_format": {"type": response_format},
+            "reasoning_effort": reasoning_effort if self.is_reasoning_model() else None,
+        }
         try:
-            completion = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_completion_tokens=tokens,
-                response_format={"type": response_format},
-                reasoning_effort=reasoning_effort if self.is_reasoning_model() else None,
-            )
-
+            completion = self.client.chat.completions.create(**compact(params))
+            # tokens = pydash.get(completion, "usage.prompt_tokens")
             return completion.choices[0].message.content
         except Exception as error:
             print("Failed to generate: " + str(error), messages)
