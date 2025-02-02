@@ -13,20 +13,23 @@ class AiChat:
         self.client = client or BasicApiClient()
         self.history = []
 
-    def message(self, text=None, img=None, role=ROLE_USER, format=TEXT_MODE):
+    def message(self, text=None, img=None, role=ROLE_USER, format=TEXT_MODE, submit=True):
         """
         Send message to the LLM
+
 
         :param text: The text content for the message
         :param img: The optional image or BytesIO or plot object
         :param role: The role of the message
+        :param format: The format of the response
+        :param submit: If True, the message will be submitted to the openai
         :return: response text.
         """
         new_msg = self.client.make_msg(text=text, img=img, role=role)
         self.history.append(new_msg)
 
         # If this is from the user, we get an openai response
-        if role == ROLE_USER:
+        if role == ROLE_USER and submit:
             assistant_text = self.client.create(
                 self.history, options={"format": format})
             self.history.append({

@@ -32,7 +32,7 @@ class BasicApiClient:
         opts = options or {}
         response_format = opts.get("format", TEXT_MODE)
         tokens = opts.get("tokens", DEFAULT_TOKEN_LIMIT)
-        reasoning_effort = opts.get("reasoning_effort", "high")
+        reasoning_effort = opts.get("reasoning_effort", REASONING_HIGH)
 
         params = {
             "model": self.model,

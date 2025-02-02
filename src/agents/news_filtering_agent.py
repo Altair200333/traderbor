@@ -36,7 +36,6 @@ class NewsFilteringAgent:
             return []
 
     def _extract_news_points(self, news, coin):
-        print(f"Extracting news points for {coin} {len(news)}")
         chat = AiChat(client=BasicApiClient(model="gpt-4o"))
 
         chat.message(

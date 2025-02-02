@@ -7,3 +7,7 @@ ROLE_USER = "user"
 ROLE_SYSTEM = "system"
 ROLE_ASSISTANT = "assistant"
 ROLE_DEVELOPER = "developer"
+
+REASONING_LOW = "low"
+REASONING_MEDIUM = "medium"
+REASONING_HIGH = "high"
