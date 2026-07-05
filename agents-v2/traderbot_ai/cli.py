@@ -242,10 +242,18 @@ Settlement just applied:
 
 Use cached market data with this exact as_of.
 Use exchange tools for wallet/order actions.
+Follow the replay step procedure from the system prompt:
+1. maintain existing positions first,
+2. reconstruct risk state,
+3. coarse-scan symbols with 4h candles only,
+4. deep-check at most 2 finalists with 1h candles,
+5. build and validate a plan only for a surviving candidate.
 Trade only valid momentum setups; otherwise return hold.
-Read recent relevant worklogs/helpers if needed before deciding.
-If a reusable screener/helper exists and its outputs are available, prefer it over manual one-off calculations.
-Do not do unrelated code edits during this replay step.
+Never request 1m candles for signal analysis.
+Never call exchange write tools on hold paths except mandatory position-maintenance close_position calls.
+Do not call settle_exchange; settlement was already applied by the runner.
+Read recent relevant worklogs/helpers only if needed before deciding.
+Do not do unrelated code exploration during this replay step.
 Return a structured TradeDecision.
 """
             try:

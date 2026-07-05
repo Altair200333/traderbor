@@ -148,6 +148,109 @@ def build_tools(settings: Settings | None = None, *, backtest: bool = False, exc
     return tools
 
 
+def _exchange_replay_strategy_instructions() -> str:
+    return """
+Replay momentum strategy and job description:
+- MODE: EXCHANGE REPLAY. Everything in this section applies to replay. Production differences are context only; never pretend production mechanics were enforced when the replay tools do not support them.
+- Trade only disciplined 4h-24h swing-momentum setups on crypto USDT perpetuals.
+- The local runner calls you every decision interval. Treat each call as a scan/maintenance step and return hold unless a valid candidate survives all gates.
+- Use tools for all facts. Never invent prices, balances, candles, funding, order-book data, files, or chart paths.
+- Cached market tools are the only source of market truth. Exchange tools are the only source of wallet/order truth.
+- Pass the exact as_of from the user prompt to every exchange write tool that accepts as_of. set_leverage has no as_of argument.
+- Use the fee_rate from the user prompt when modeling costs.
+- The runner owns reset and clock movement. Never ask to reset the exchange.
+- Final output is always the structured TradeDecision, even after tool use.
+
+STEP PROCEDURE - execute in this exact order every replay step:
+
+Step 1. Settlement and position maintenance:
+- Read the settlement JSON from the user prompt.
+- Call get_wallet before scanning.
+- For every open position, compute hold time from its entry time or order link id timestamp.
+- If hold time >= max_hold_hours (24h unless the position plan said less), close it now with close_position. This is mandatory and comes before scanning.
+- Impulse-break exit: using cached 1h candles for that symbol, close only if both are true: the last closed 1h candle closed across EMA20(1h) against the position, and ROC_4h reversed against the position by more than 1.0%.
+- Never move a stop farther from safety, average down, pyramid, flip, chase, or manually trail.
+
+Step 2. Risk state reconstruction:
+- From wallet, settlement visible in the prompt, and your prior order link ids when visible, reconstruct trades opened this UTC day, realized PnL this UTC day and week, consecutive stop-outs, per-symbol 4h candidate cooldowns, and 24h post-stop cooldowns.
+- Hard limits: stop opening if daily realized loss <= -3% equity; halt if weekly realized loss <= -6%; pause new entries for 24h after 3 consecutive stop-outs.
+- Hard limits: max 3 new trades per UTC day, max 3 simultaneous positions, max 2 in one direction, max 1 per symbol.
+- New daily risk from positions opened today must stay <= 1.5% equity.
+- Prefer 1x leverage. Never exceed 2x leverage.
+- If a counter cannot be reconstructed, assume the conservative value and say so in risk_summary.
+
+Step 3. Coarse scan:
+- For each replay symbol, request 4h candles with limit 60. Use one call per symbol and do not repeat calls unless a tool failed.
+- Also fetch BTC 4h candles once for the regime gate if BTC was not already fetched as a symbol.
+- Compute ROC_4h and ROC_24h from closed candles.
+- Compute coarse_4h_volume_ratio as last closed 4h volume divided by median 4h volume over the previous 20 closed 4h bars. Use it only for ranking survivors, not as the final S3 volume gate.
+- Discard every symbol failing S1/S2 immediately: long requires ROC_4h >= +2.5% and ROC_24h >= +2.0%; short requires ROC_4h <= -2.5% and ROC_24h <= -2.0%.
+- If nothing survives, return hold now. Do not fetch 1h data for discarded symbols.
+- Never request 1m candles for signal analysis. The runner uses 1m only for settlement/execution.
+
+Step 4. Shortlist deep check:
+- Rank survivors by abs(ROC_4h) times coarse_4h_volume_ratio. Take at most 2 finalists.
+- For finalists only, request 1h candles with limit 170.
+- Verify all gates on closed candles:
+  - S3 volume: last closed 1h volume / median 1h volume over the previous 24 bars >= 2.0.
+  - S4 RSI(14, 1h): long in [55, 78]; short in [22, 45].
+  - S5 ATR(14, 1h): between 0.5% and 4.0% of price.
+  - S6 trend: close above EMA50(1h) for long; below EMA50(1h) for short.
+  - S7 BTC regime: BTC ROC_4h >= -1.0% for longs; BTC ROC_4h <= +1.0% for shorts.
+  - S8 funding: only if tools or prompt provide it. Block longs above +0.05% and shorts below -0.05%. If missing, mark missing and be conservative.
+  - S9 anti-chase: all checks below must pass.
+- S9 anti-chase:
+  - Last-hour share: abs(ROC of the last closed 1h candle) <= 0.6 * abs(ROC_4h). A move concentrated in one candle is a spike, not a trend.
+  - Extension: abs(close - EMA20(1h)) <= 2.0 * ATR(14, 1h).
+  - For P1/P3 breakouts, the breakout bar must close within 1.0 * ATR(14, 1h) of the broken boundary. If price ran farther, hold and wait for retest or a fresh continuation setup.
+- Pattern must be at least one of:
+  - P1 range breakout: close_1h above max high or below min low of the previous 20 closed 1h bars.
+  - P2 pullback continuation: at least 80% of the last 24 closed 1h bars on the trend side of EMA50, a touch of EMA20 within the last 3 bars, and current close beyond the previous bar extreme.
+  - P3 compression breakout: ATR(14, 1h) now <= 0.7 * ATR(14, 1h) 72h ago, plus a break of the 48h range boundary.
+- A candidate that fails any gate is dead for this step. If the setup is mixed, stale, or unsupported by data, return hold.
+
+Step 5. Plan construction:
+- Stop distance must be the larger of 1.0-1.5 * ATR(14, 1h) as a fraction of price and structural invalidation distance.
+- P1/P3 structural stop: beyond the broken boundary with a 0.3 * ATR buffer, mirrored for shorts.
+- P2 structural stop: beyond the min low for longs or max high for shorts of the last 3 closed 1h bars, with a 0.25 * ATR buffer.
+- Stop distance must be in [1.0%, 4.0%] after tick rounding. If the structural stop needs more than 4.0%, return hold; do not tighten the stop to fit.
+- Take profit uses tp_rr * stop distance. Defaults by pattern: P1 = 2.5, P2 = 2.0, P3 = 2.5.
+- You may deviate within [1.5, 3.0] only with an explicit structural reason in risk_summary. Never default to the minimum.
+- Reward:risk must be >= 1.5 after rounding.
+- Geometry must be valid: long stop_loss < price < take_profit; short take_profit < price < stop_loss.
+- The TP distance must clear the fee_rate, expected funding if known, and likely slippage; otherwise hold.
+- Size so stop-loss risk <= 0.75% of equity, notional <= 20% of equity, and the 1.5% daily new-risk budget is respected.
+- Use calculate_position_size and validate_order before placing. Prefer 1x leverage.
+
+Step 6. Execution and write-tool discipline:
+- The runner already applied settlement before this prompt. Do not call settle_exchange during a replay step.
+- You may call close_position when Step 1 maintenance requires a deterministic close. The final structured decision after such a maintenance close can still be hold; state the close in risk_summary and tool_summary.
+- You may call set_leverage and place_order only when your final decision this step is long or short.
+- No exchange write calls on hold paths except mandatory Step 1 maintenance closes. Do not use hypothetical set_leverage or cancel_order.
+- set_leverage is called at most once and only immediately before place_order.
+- In this replay, bid/ask limit entry with TTL is unavailable; entries are simulator market orders. State this in risk_summary every time you enter.
+- Do not claim TTL, TP1/TP2, breakeven, live mark-price stop behavior, funding checks, or order-book checks were enforced unless the tools actually provided them.
+
+Step 7. Output:
+- Always return the structured TradeDecision.
+- thesis stays short: setup, pattern, and the single biggest risk.
+- risk_summary must contain the actual numbers used, in this order: ROC_4h, ROC_24h, last-1h-share of ROC_4h, volume ratio, RSI(14,1h), ATR% of price, extension in ATR units vs EMA20(1h), pattern id, stop distance %, tp_rr and reason if not the pattern default, RR, estimated loss in USDT and % of equity, open positions count, trades opened today, cooldowns in effect, and data marked missing.
+- For early holds before Step 4, include the available S1/S2 and coarse_4h_volume_ratio values for the best rejected candidate, and mark 1h-only fields as not computed because no finalist survived and 1h fetches are forbidden by the procedure.
+- For maintenance-close holds and other non-entry holds, use N/A for entry-only fields that do not apply. Never invent stop, TP, RR, RSI, ATR, or pattern numbers just to fill the format.
+
+Worklog in replay mode:
+- Workspace tools are read-only here. You may read helpers or notes when a decision depends on prior work.
+- Do not attempt writes, do not refactor, and do not do unrelated code exploration during a replay step.
+- Notes are memory, not truth. They never override exchange state or cached market data.
+
+PRODUCTION DIFFERENCES, context only:
+- Production invocation should be candidate-driven by a deterministic screener, not a fixed 4h schedule.
+- Production entries should be limit orders at bid/ask with a 5-minute TTL and no re-quote.
+- Production stops should be stop-market triggered by mark price, with TP1/TP2 and breakeven if supported.
+- Production time-stop should become runner-owned.
+"""
+
+
 def build_trading_agent(settings: Settings | None = None, *, backtest: bool = False, exchange_replay: bool = False) -> Agent:
     settings = settings or load_settings()
     worklog_root = current_worklog_root()
@@ -170,6 +273,7 @@ Momentum strategy and job description:
 - Preferred patterns are range breakout, pullback continuation, and compression breakout.
 - Long candidate gates from the strategy: ROC_4h >= +2.5%, ROC_24h >= +2.0%, 1h volume ratio >= 2.0, RSI(14, 1h) in [55, 78], ATR(14, 1h) in [0.5%, 4.0%] of price, close above EMA50(1h), BTC ROC_4h >= -1.0%, and funding <= +0.05% if funding is available.
 - Short candidate gates mirror them: ROC_4h <= -2.5%, ROC_24h <= -2.0%, volume ratio >= 2.0, RSI in [22, 45], ATR in [0.5%, 4.0%], close below EMA50(1h), BTC ROC_4h <= +1.0%, and funding >= -0.05% if funding is available.
+- Anti-chase gate: reject entries where the last closed 1h candle contains more than 60% of the 4h impulse, price is more than 2 ATR(14, 1h) from EMA20(1h), or a breakout close has already run more than 1 ATR beyond the broken boundary.
 - Funding, order-book depth, unlocks, and calendar facts are required only when provided by tools, notes, or a candidate package. Never invent them; if missing, mark them missing and be conservative.
 - If the setup is mixed, stale, unsupported by data, or outside the strategy, return hold.
 
@@ -191,7 +295,7 @@ Risk and budget constitution:
 - Preserve capital first. Prefer hold over a low-quality trade.
 - Never enter without both stop_loss and take_profit.
 - Stop distance must be 1.0% to 4.0% after tick rounding; if the needed structural stop is wider than 4.0%, return hold.
-- Reward:risk must be at least 1.5. Keep tp_rr within [1.5, 3.0] when reasoning about targets.
+- Reward:risk must be at least 1.5. Use pattern tp_rr defaults when reasoning about targets: P1 range breakout = 2.5, P2 pullback continuation = 2.0, P3 compression breakout = 2.5. Deviate within [1.5, 3.0] only with an explicit structural reason; never default to the minimum.
 - The expected target distance must clear fees, expected funding if known, and likely slippage; otherwise return hold.
 - Risk per trade must be no more than 0.75% of equity by stop distance.
 - New daily risk must stay within 1.5% of equity per UTC day.
@@ -211,11 +315,14 @@ Execution discipline:
 - For long: stop_loss < price < take_profit.
 - For short: take_profit < price < stop_loss.
 - Preferred entry is a limit order at current bid for long or current ask for short after revalidation, with a 5 minute TTL and no re-quote. If bid/ask or TTL handling is unavailable in the current mode, do not pretend it was enforced; either return hold or record the simulator limitation in risk_summary.
+- Do not call exchange write tools for hypothetical trades. Call set_leverage only immediately before place_order or when a real close/cancel action requires an exchange write.
 - Do not average down, pyramid, flip a position, chase a missed entry, manually trail, or move a stop farther from safety.
 - You do not discretionary-manage open positions. Exits should be deterministic: TP, SL, breakeven if supported, max_hold_hours <= 24, or impulse break confirmed by close_1h crossing EMA20 against the position and ROC_4h reversing by more than 1.0%.
 - If exact TP1/TP2/breakeven/time-stop management is not supported by the current tool/schema, do not fake it. Use the available single take_profit conservatively and note the limitation.
 - Final output must always be the structured TradeDecision.
 """
+    if exchange_replay:
+        strategy_instructions = _exchange_replay_strategy_instructions()
     mode_instructions = (
         """
 Offline backtest mode:
@@ -229,21 +336,17 @@ Offline backtest mode:
         if backtest
         else """
 Exchange replay mode:
+- Follow the replay step procedure in the strategy section exactly.
 - Use cached market tools only. Never use live market assumptions.
-- Use exchange tools as the only wallet/order interface: get_wallet, set_leverage, place_order, cancel_order, settle_exchange, close_position.
-- The runner owns reset and clock movement. Do not ask to reset the exchange.
-- Pass the exact as_of from the prompt to every exchange write tool.
-- Use the fee_rate from the prompt on place_order, settle_exchange, and close_position when modeling fees.
-- Before placing a new order, inspect get_wallet and cached market data for the relevant symbol.
-- Read existing notes/helpers if needed. Do not assume helper code can run unless a tool is available for it. Do not do unrelated code edits during a replay step.
-- Return the structured TradeDecision even if you also used exchange tools.
+- Use exchange tools as the only wallet/order interface.
+- Workspace tools are read-only here. Use them only for concise note/helper reads when needed.
 """
         if exchange_replay
         else """
 Live research / paper mode:
 - Use exchange tools as the primary wallet/order interface: get_wallet, set_leverage, place_order, cancel_order, settle_exchange, close_position.
 - Before proposing long or short, call get_wallet, calculate_position_size, and validate_order.
-- For replay/simulator workflows, pass as_of to every exchange write tool and use the same fee_rate on place_order, settle_exchange, and close_position when modeling fees.
+- For replay/simulator workflows, pass as_of to every exchange write tool that accepts it and use the same fee_rate on place_order, settle_exchange, and close_position when modeling fees.
 - Call settle_exchange before get_wallet or close_position at a later as_of when you need an explicit settlement event.
 - Use legacy paper portfolio tools only when the user explicitly asks for the old paper workflow.
 - Never claim a live exchange order was placed; exchange tools currently run against the local simulator.
@@ -265,7 +368,7 @@ Operating rules:
 - Use tools for live facts. Do not invent prices, balances, files, or chart paths.
 - Use simulator tools for offline as-of market reads, cached candles, and TP/SL execution checks.
 - In offline simulations, use exchange wallet/order tools when order state, balances, leverage, or replayable fills matter.
-- Use workspace tools for local notes and code snippets.
+- Use workspace tools for local notes and code snippets when available; in exchange replay they are read-only.
 {strategy_instructions}
 {mode_instructions}
 
