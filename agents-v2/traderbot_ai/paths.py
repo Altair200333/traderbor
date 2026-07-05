@@ -12,7 +12,7 @@ RUNS_DIR = AGENTS_V2_ROOT / "runs"
 CHARTS_DIR = AGENTS_V2_ROOT / "charts"
 ARTIFACTS_DIR = AGENTS_V2_ROOT / "artifacts"
 TMP_DIR = AGENTS_V2_ROOT / "tmp"
-WORKLOG_DIR = PROJECT_ROOT / "worklog"
+WORKLOG_DIR = AGENTS_V2_ROOT / "worklog"
 
 
 def ensure_runtime_dirs() -> None:

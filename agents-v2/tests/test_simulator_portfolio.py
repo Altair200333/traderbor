@@ -133,7 +133,7 @@ class BacktestRunnerTests(unittest.TestCase):
 
         self.assertFalse(args.no_preload)
         self.assertFalse(args.agg_trades)
-        self.assertEqual(args.cache_intervals, "1s,1m,15m")
+        self.assertEqual(args.cache_intervals, "1m,1h,4h")
 
     def test_entry_fill_uses_next_execution_open(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

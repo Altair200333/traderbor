@@ -19,6 +19,7 @@ from traderbot_ai.paths import (
     ensure_runtime_dirs,
     safe_agents_path,
 )
+from traderbot_ai.runtime.run_context import get_current_run_id, normalize_run_id
 
 
 ReadUnit = Literal["chars", "lines"]
@@ -305,16 +306,19 @@ def search_local_files_impl(
         return _error(str(error), query=query, path=path)
 
 
-def append_worklog_record(markdown: str) -> dict:
+def append_worklog_record(markdown: str, run_id: str | None = None) -> dict:
     ensure_runtime_dirs()
     today = datetime.now().date().isoformat()
-    path = WORKLOG_DIR / f"{today}-record.md"
+    active_run_id = normalize_run_id(run_id) or get_current_run_id()
+    root = WORKLOG_DIR / "runs" / active_run_id if active_run_id else WORKLOG_DIR
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"{today}-record.md"
     header = f"\n\n## {datetime.now().isoformat(timespec='seconds')}\n\n"
     with path.open("a", encoding="utf-8") as f:
         f.write(header)
         f.write(markdown.strip())
         f.write("\n")
-    return _ok(path=display_path(path))
+    return _ok(path=display_path(path), run_id=active_run_id)
 
 
 def run_python_code_impl(code: str, timeout_seconds: int = 30) -> dict:
@@ -419,4 +423,3 @@ def append_worklog(markdown: str) -> dict:
 def run_python_code(code: str, timeout_seconds: int = 30) -> dict:
     """Run small Python code in agents-v2. Returns stdout and stderr."""
     return run_python_code_impl(code=code, timeout_seconds=timeout_seconds)
-

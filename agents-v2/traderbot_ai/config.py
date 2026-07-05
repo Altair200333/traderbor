@@ -18,6 +18,14 @@ class Settings:
     openai_api_key_present: bool
     enable_codex_tool: bool
     disable_tracing: bool
+    max_tokens: int = 64000
+    context_compaction_enabled: bool = True
+    context_compaction_model: str = "gpt-5.5"
+    context_compaction_reasoning_effort: str = "low"
+    context_compaction_max_tokens: int = 12000
+    context_compaction_threshold_messages: int = 10
+    context_compaction_compact_messages: int = 7
+    context_compaction_max_rolls: int = 8
 
 
 def load_settings() -> Settings:
@@ -28,7 +36,15 @@ def load_settings() -> Settings:
     settings = Settings(
         model=os.getenv("TRADERBOT_MODEL", "gpt-5.5"),
         vision_model=os.getenv("TRADERBOT_VISION_MODEL", os.getenv("TRADERBOT_MODEL", "gpt-5.5")),
-        reasoning_effort=os.getenv("TRADERBOT_REASONING_EFFORT", "medium"),
+        reasoning_effort=os.getenv("TRADERBOT_REASONING_EFFORT", "high"),
+        max_tokens=int(os.getenv("TRADERBOT_MAX_TOKENS", "64000")),
+        context_compaction_enabled=os.getenv("TRADERBOT_CONTEXT_COMPACTION_ENABLED", "1") not in {"0", "false", "False"},
+        context_compaction_model=os.getenv("TRADERBOT_CONTEXT_COMPACTION_MODEL", "gpt-5.5"),
+        context_compaction_reasoning_effort=os.getenv("TRADERBOT_CONTEXT_COMPACTION_REASONING_EFFORT", "low"),
+        context_compaction_max_tokens=int(os.getenv("TRADERBOT_CONTEXT_COMPACTION_MAX_TOKENS", "12000")),
+        context_compaction_threshold_messages=int(os.getenv("TRADERBOT_CONTEXT_COMPACTION_THRESHOLD_MESSAGES", "10")),
+        context_compaction_compact_messages=int(os.getenv("TRADERBOT_CONTEXT_COMPACTION_COMPACT_MESSAGES", "7")),
+        context_compaction_max_rolls=int(os.getenv("TRADERBOT_CONTEXT_COMPACTION_MAX_ROLLS", "8")),
         paper_balance_usdt=float(os.getenv("TRADERBOT_PAPER_BALANCE_USDT", "1000")),
         market_data_mode=os.getenv("TRADERBOT_MARKET_DATA_MODE", "live").lower(),
         openai_api_key_present=bool(os.getenv("OPENAI_API_KEY")),

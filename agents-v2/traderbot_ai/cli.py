@@ -14,6 +14,7 @@ from traderbot_ai.agents.trading import build_tools, build_trading_agent
 from traderbot_ai.config import load_settings
 from traderbot_ai.providers import provider_status
 from traderbot_ai.runtime.run_store import write_run_record
+from traderbot_ai.runtime.run_context import agent_run_context, current_worklog_root
 from traderbot_ai.runtime.sessions import get_session
 from traderbot_ai.simulator.backtest import build_config, run_backtest
 from traderbot_ai.simulator.exchange_replay import build_exchange_replay_config, run_exchange_replay
@@ -44,6 +45,12 @@ def _jsonable(value: Any) -> Any:
     elif not isinstance(value, (str, int, float, bool, type(None))):
         return str(value)
     return value
+
+
+def _close_session(session: Any) -> None:
+    close = getattr(session, "close", None)
+    if callable(close):
+        close()
 
 
 def cmd_providers(args: argparse.Namespace) -> None:
@@ -129,7 +136,7 @@ def cmd_backtest(args: argparse.Namespace) -> None:
     settings = replace(load_settings(), market_data_mode="cache")
     agent = build_trading_agent(settings, backtest=True)
     session_name = args.session or f"backtest-{config.symbol.lower()}-{config.start_ms}-{config.end_ms}-{uuid.uuid4().hex[:8]}"
-    session = get_session(session_name)
+    session = get_session(session_name, settings=settings)
 
     def decide(context: dict[str, Any]) -> dict[str, Any]:
         prompt = f"""
@@ -139,15 +146,25 @@ Symbol: {context["symbol"]}
 As-of: {context["as_of_iso"]} ({context["as_of_ms"]})
 Decision interval: {context["decision_interval"]}
 Execution interval: {context["execution_interval"]}
+Agent cadence in this runner: every {context["decision_interval"]}. Production target is candidate-driven; no valid candidate means hold.
+Strategy horizon: 4h to 24h swing momentum.
+Worklog memory root: {current_worklog_root()}.
 Simulated portfolio summary:
 {json.dumps(_jsonable(context["portfolio"]), ensure_ascii=False)}
 
-Use cached market tools only. Use as_of exactly. Return a structured TradeDecision.
+Use cached market tools only. Use as_of exactly.
+Trade only valid momentum setups; otherwise return hold.
+Read existing notes/helpers if needed, but do not write worklogs during backtests.
+If a reusable screener/helper exists and its outputs are available, prefer it over manual one-off calculations.
+Return a structured TradeDecision.
 """
         result = Runner.run_sync(agent, prompt, session=session, max_turns=args.max_turns)
         return _jsonable(result.final_output)
 
-    _dump(run_backtest(config=config, decide=decide))
+    try:
+        _dump(run_backtest(config=config, decide=decide))
+    finally:
+        _close_session(session)
 
 
 def cmd_exchange_replay(args: argparse.Namespace) -> None:
@@ -196,9 +213,13 @@ def cmd_exchange_replay(args: argparse.Namespace) -> None:
         settings = replace(load_settings(), market_data_mode="cache", enable_codex_tool=False)
         agent = build_trading_agent(settings, exchange_replay=True)
         session_name = args.session or f"{config.run_id}-agent"
-        session = get_session(session_name)
 
         def decide(context: dict[str, Any]) -> dict[str, Any]:
+            step_session = get_session(
+                f"{session_name}-{context['as_of_ms']}",
+                settings=settings,
+                enable_compaction=False,
+            )
             prompt = f"""
 Exchange replay step.
 
@@ -209,6 +230,9 @@ Next step: {context["next_as_of_ms"]}
 Decision interval: {context["decision_interval"]}
 Execution interval: {context["execution_interval"]}
 Fee rate: {context["fee_rate"]}
+Agent cadence in this runner: every {context["decision_interval"]}. Production target is candidate-driven; no valid candidate means hold.
+Strategy horizon: 4h to 24h swing momentum.
+Worklog memory root: {current_worklog_root()}.
 
 Wallet:
 {json.dumps(_jsonable(context["wallet"]), ensure_ascii=False)}
@@ -218,9 +242,16 @@ Settlement just applied:
 
 Use cached market data with this exact as_of.
 Use exchange tools for wallet/order actions.
+Trade only valid momentum setups; otherwise return hold.
+Read recent relevant worklogs/helpers if needed before deciding.
+If a reusable screener/helper exists and its outputs are available, prefer it over manual one-off calculations.
+Do not do unrelated code edits during this replay step.
 Return a structured TradeDecision.
 """
-            result = Runner.run_sync(agent, prompt, session=session, max_turns=args.max_turns)
+            try:
+                result = Runner.run_sync(agent, prompt, session=step_session, max_turns=args.max_turns)
+            finally:
+                _close_session(step_session)
             run_log = write_run_record(session_name, prompt, result)
             output = _jsonable(result.final_output)
             if isinstance(output, dict):
@@ -247,24 +278,32 @@ def cmd_replay_report(args: argparse.Namespace) -> None:
 
 
 def cmd_worklog(args: argparse.Namespace) -> None:
-    _dump(append_worklog_record(args.markdown))
+    _dump(append_worklog_record(args.markdown, run_id=args.run_id))
 
 
 def cmd_run(args: argparse.Namespace) -> None:
     settings = load_settings()
-    agent = build_trading_agent(settings)
-    session = get_session(args.session)
-    result = Runner.run_sync(
-        agent,
-        args.prompt,
-        session=session,
-        max_turns=args.max_turns,
-    )
+    run_id = args.run_id or args.session
+    with agent_run_context(run_id):
+        worklog_root = current_worklog_root()
+        agent = build_trading_agent(settings)
+        session = get_session(args.session, settings=settings)
+        try:
+            result = Runner.run_sync(
+                agent,
+                args.prompt,
+                session=session,
+                max_turns=args.max_turns,
+            )
+        finally:
+            _close_session(session)
     run_log = write_run_record(args.session, args.prompt, result)
     final_output = result.final_output
     _dump(
         {
             "session": args.session,
+            "run_id": run_id,
+            "worklog_root": worklog_root,
             "run_log": run_log,
             "final_output": final_output,
         }
@@ -273,7 +312,10 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 def cmd_history(args: argparse.Namespace) -> None:
     session = get_session(args.session)
-    items = asyncio.run(session.get_items(limit=args.limit))
+    try:
+        items = asyncio.run(session.get_items(limit=args.limit))
+    finally:
+        _close_session(session)
     _dump({"session": args.session, "items": items})
 
 
@@ -296,7 +338,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     market_cache = sub.add_parser("market-cache", help="Preload or inspect the local market cache.")
     market_cache.add_argument("--symbols", default="BTCUSDT", help="CSV symbols, e.g. BTCUSDT,ETHUSDT.")
-    market_cache.add_argument("--intervals", default="1m", help="CSV intervals, e.g. 1s,1m,5m.")
+    market_cache.add_argument("--intervals", default="1m,1h,4h", help="CSV intervals, e.g. 1m,1h,4h.")
     market_cache.add_argument("--start-time")
     market_cache.add_argument("--end-time")
     market_cache.add_argument("--max-candles-per-pair", type=int)
@@ -322,9 +364,9 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--symbol", required=True)
     backtest.add_argument("--start-time", required=True)
     backtest.add_argument("--end-time", required=True)
-    backtest.add_argument("--decision-interval", default="15m")
+    backtest.add_argument("--decision-interval", default="4h")
     backtest.add_argument("--execution-interval", default="1m")
-    backtest.add_argument("--cache-intervals", default="1s,1m,15m")
+    backtest.add_argument("--cache-intervals", default="1m,1h,4h")
     backtest.add_argument("--balance-usdt", type=float, default=1000.0)
     backtest.add_argument("--fee-rate", type=float, default=0.0)
     backtest.add_argument("--session")
@@ -342,7 +384,7 @@ def build_parser() -> argparse.ArgumentParser:
     exchange_replay.add_argument("--end-time", required=True)
     exchange_replay.add_argument("--decision-interval", default="4h")
     exchange_replay.add_argument("--execution-interval", default="1m")
-    exchange_replay.add_argument("--cache-intervals", default="1m,4h")
+    exchange_replay.add_argument("--cache-intervals", default="1m,1h,4h")
     exchange_replay.add_argument("--balance-usdt", type=float, default=1000.0)
     exchange_replay.add_argument("--balances-json", help='Optional wallet balances, e.g. {"USDT": 1000, "BTC": 0.01}.')
     exchange_replay.add_argument("--fee-rate", type=float, default=0.0)
@@ -369,10 +411,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     worklog = sub.add_parser("worklog", help="Append to worklog/YYYY-MM-DD-record.md.")
     worklog.add_argument("markdown")
+    worklog.add_argument("--run-id", help="Write under worklog/runs/<run-id>.")
     worklog.set_defaults(func=cmd_worklog)
 
     run = sub.add_parser("run", help="Run the trading agent.")
     run.add_argument("--session", default="default")
+    run.add_argument("--run-id", help="Worklog run id. Defaults to --session.")
     run.add_argument("--prompt", required=True)
     run.add_argument("--max-turns", type=int, default=12)
     run.set_defaults(func=cmd_run)
