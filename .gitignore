@@ -138,3 +138,11 @@ ui-tests/playwright-report
 ui-tests/.yarn/*
 ui-tests/.pnp.*
 .env
+.venv/
+agents-v2/charts/
+agents-v2/artifacts/
+agents-v2/data/
+agents-v2/runs/
+agents-v2/tmp/
+/docs/notes
+/worklog

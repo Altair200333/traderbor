@@ -1,0 +1,8 @@
+openai-agents==0.17.7
+openai==2.44.0
+python-dotenv==1.2.2
+pydantic==2.13.4
+requests==2.34.2
+pandas==3.0.3
+matplotlib==3.11.0
+mplfinance==0.12.10b0
