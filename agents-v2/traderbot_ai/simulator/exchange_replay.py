@@ -15,6 +15,12 @@ from pydantic import BaseModel
 
 from traderbot_ai.exchange import SimulatedExchange
 from traderbot_ai.paths import DATA_DIR, ensure_runtime_dirs
+from traderbot_ai.screener import ScreenerConfig, ScreenerStateStore, TradingState, scan as run_screener
+from traderbot_ai.screener.artifacts import write_scan_artifacts
+from traderbot_ai.screener.data import load_closed, validate_frame
+from traderbot_ai.screener.maintenance import MaintenanceAction, check_impulse_break, check_max_hold
+from traderbot_ai.screener.render import to_markdown_table
+from traderbot_ai.screener.state import state_from_wallet_and_events
 from traderbot_ai.simulator.clock import (
     clear_file_simulation_clock_state,
     clear_process_simulation_clock_state,
@@ -45,6 +51,7 @@ class ExchangeReplayConfig:
     state_path: Path | None = None
     events_path: Path | None = None
     replay_path: Path | None = None
+    screener_mode: str = "off"
 
 
 def build_exchange_replay_config(
@@ -61,6 +68,7 @@ def build_exchange_replay_config(
     state_path: str | Path | None = None,
     events_path: str | Path | None = None,
     replay_path: str | Path | None = None,
+    screener_mode: str = "off",
 ) -> ExchangeReplayConfig:
     normalized_symbols = tuple(normalize_symbol(symbol) for symbol in _split_symbols(symbols))
     if not normalized_symbols:
@@ -75,6 +83,8 @@ def build_exchange_replay_config(
         raise ValueError(f"unsupported decision_interval: {decision_interval}")
     if execution_interval not in INTERVAL_MS:
         raise ValueError(f"unsupported execution_interval: {execution_interval}")
+    if screener_mode not in {"off", "deterministic", "legacy-self-screen"}:
+        raise ValueError("screener_mode must be off, deterministic, or legacy-self-screen")
     fee_rate_value = float(fee_rate)
     if not math.isfinite(fee_rate_value) or fee_rate_value < 0:
         raise ValueError("fee_rate must be non-negative")
@@ -98,6 +108,7 @@ def build_exchange_replay_config(
         state_path=Path(state_path) if state_path is not None else DATA_DIR / f"{safe_run_id}.exchange.json",
         events_path=Path(events_path) if events_path is not None else DATA_DIR / f"{safe_run_id}.exchange.events.jsonl",
         replay_path=Path(replay_path) if replay_path is not None else DATA_DIR / f"{safe_run_id}.replay.jsonl",
+        screener_mode=screener_mode,
     )
 
 
@@ -129,6 +140,8 @@ def run_exchange_replay(
     previous_clock = process_simulation_clock_ms()
     previous_file_clock = file_simulation_clock_ms()
     steps = []
+    screener_cfg = ScreenerConfig()
+    screener_state = ScreenerStateStore()
     step_ms = INTERVAL_MS[config.decision_interval]
     as_of_ms = config.start_ms
 
@@ -145,6 +158,16 @@ def run_exchange_replay(
                 set_simulation_clock_state(as_of_ms)
                 settlement = exchange.settle(as_of=as_of_ms, interval=config.execution_interval, fee_rate=config.fee_rate)
                 wallet_before = exchange.wallet_summary(symbols=list(config.symbols), as_of=as_of_ms, mark_interval=config.execution_interval)
+                maintenance_cursor = _file_size(exchange.events_path)
+                maintenance_actions: list[dict[str, Any]] = []
+                maintenance_warnings: list[str] = []
+                maintenance_exchange_events: list[dict[str, Any]] = []
+                if config.screener_mode == "deterministic":
+                    maintenance_actions, maintenance_warnings = _apply_runner_maintenance(exchange, cache, wallet_before, as_of_ms, config.fee_rate, screener_cfg)
+                    maintenance_exchange_events = _read_jsonl_since(exchange.events_path, maintenance_cursor)
+                    if maintenance_actions:
+                        wallet_before = exchange.wallet_summary(symbols=list(config.symbols), as_of=as_of_ms, mark_interval=config.execution_interval)
+                scan_context = _build_deterministic_scan_context(config, cache, wallet_before, as_of_ms, screener_cfg, screener_state) if config.screener_mode == "deterministic" else {}
                 context = {
                     "run_id": config.run_id,
                     "symbols": list(config.symbols),
@@ -156,20 +179,40 @@ def run_exchange_replay(
                     "fee_rate": config.fee_rate,
                     "wallet": wallet_before,
                     "settlement": settlement,
+                    "maintenance_actions": maintenance_actions,
+                    "maintenance_warnings": maintenance_warnings,
+                    **scan_context,
                     "exchange_state_path": str(exchange.path),
                     "exchange_events_path": str(exchange.events_path),
                     "replay_path": str(replay_path),
                 }
                 _append_replay_event(replay_path, "step_started", _step_header(context))
                 exchange_event_cursor = _file_size(exchange.events_path)
-                decision = _jsonable(decide(context))
+                if config.screener_mode == "deterministic" and not context.get("screener_candidates"):
+                    decision = _auto_hold_decision(context)
+                else:
+                    if config.screener_mode == "deterministic":
+                        with _deterministic_candidate_allowlist_env(context):
+                            decision = _jsonable(decide(context))
+                    else:
+                        decision = _jsonable(decide(context))
                 agent_exchange_events = _read_jsonl_since(exchange.events_path, exchange_event_cursor)
-                _validate_decision_exchange_consistency(decision, agent_exchange_events)
+                _validate_decision_exchange_consistency(
+                    decision,
+                    agent_exchange_events,
+                    allow_hold_position_closes=config.screener_mode != "deterministic",
+                    allowed_entry_candidates=_allowed_entry_candidates(context) if config.screener_mode == "deterministic" else None,
+                    strict_entry_events=config.screener_mode == "deterministic",
+                )
                 wallet_after = exchange.wallet_summary(symbols=list(config.symbols), as_of=as_of_ms, mark_interval=config.execution_interval)
                 step = {
                     "as_of_ms": as_of_ms,
                     "as_of_iso": _iso_ms(as_of_ms),
                     "settlement": _compact_settlement(settlement),
+                    "maintenance_actions": maintenance_actions,
+                    "maintenance_warnings": maintenance_warnings,
+                    "maintenance_exchange_events": maintenance_exchange_events,
+                    "scan": _compact_scan_context(context),
                     "wallet_before": _compact_wallet(wallet_before),
                     "decision": decision,
                     "agent_exchange_events": agent_exchange_events,
@@ -252,6 +295,171 @@ def exchange_tool_environment(
         _restore_env("TRADERBOT_EXCHANGE_EXECUTION_INTERVAL", old_execution_interval)
 
 
+def _build_deterministic_scan_context(
+    config: ExchangeReplayConfig,
+    cache: LocalMarketCache,
+    wallet: dict[str, Any],
+    as_of_ms: int,
+    screener_cfg: ScreenerConfig,
+    screener_state: ScreenerStateStore,
+) -> dict[str, Any]:
+    state = state_from_wallet_and_events(
+        wallet,
+        _read_jsonl_since(_required_path(config.events_path), 0),
+        as_of_ms,
+        last_candidate_ts=screener_state.last_candidate_ts,
+    )
+    result = run_screener(
+        symbols=list(config.symbols),
+        as_of_ms=as_of_ms,
+        cfg=screener_cfg,
+        state=state,
+        cache_path=cache.path,
+    )
+    artifacts = write_scan_artifacts(result, config.run_id)
+    rows = [row.model_dump(mode="json") for row in result.symbols]
+    screener_state.update_from_scan_rows(rows, as_of_ms)
+    candidate_primitives = [
+        {
+            "symbol": row.symbol,
+            "side": row.candidate,
+            "plan": None if row.plan is None else row.plan.model_dump(mode="json"),
+            "signal_candidate_before_state": row.signal_candidate_before_state,
+        }
+        for row in result.symbols
+        if row.candidate in {"long", "short"}
+    ]
+    return {
+        "screener_mode": "deterministic",
+        "scan_markdown": to_markdown_table(result),
+        "scan_artifact_path": artifacts["artifact_path"],
+        "scan_hash": artifacts["sha256"],
+        "candidate_primitives": candidate_primitives,
+        "screener_candidates": [item["symbol"] for item in candidate_primitives],
+        "global_blocks": result.global_blocks,
+        "data_warnings": result.data_warnings,
+    }
+
+
+def _apply_runner_maintenance(
+    exchange: SimulatedExchange,
+    cache: LocalMarketCache,
+    wallet: dict[str, Any],
+    as_of_ms: int,
+    fee_rate: float,
+    screener_cfg: ScreenerConfig,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    actions = []
+    warnings = []
+    for position in wallet.get("open_positions") or []:
+        side = "long" if position.get("side") in {"Buy", "long"} else "short"
+        reason = None
+        if check_max_hold(position, as_of_ms, screener_cfg):
+            reason = "max_hold"
+        else:
+            try:
+                frame = load_closed(cache.path, position.get("symbol"), INTERVAL_MS["1h"], as_of_ms, screener_cfg.min_1h_bars)
+                issue = validate_frame(frame, as_of_ms, screener_cfg.min_1h_bars)
+                if issue is not None:
+                    warnings.append(f"{position.get('symbol')}:impulse_break_unchecked:{issue.reason}")
+                elif check_impulse_break(frame, side, screener_cfg):
+                    reason = "impulse_break"
+            except Exception as error:
+                warnings.append(f"{position.get('symbol')}:impulse_break_unchecked:{error}")
+                reason = None
+        if reason is None:
+            continue
+        action = MaintenanceAction(
+            action="close_position",
+            reason=reason,
+            symbol=position.get("symbol"),
+            side=side,
+            position_id=position.get("position_id"),
+        )
+        closed = exchange.close_position(
+            position_id=position.get("position_id"),
+            symbol=position.get("symbol"),
+            as_of=as_of_ms,
+            mark_interval="1m",
+            fee_rate=fee_rate,
+        )
+        actions.append({**action.model_dump(mode="json"), "closed_position": closed.get("closed_position")})
+    return actions, warnings
+
+
+def _auto_hold_decision(context: dict[str, Any]) -> dict[str, Any]:
+    reason = "auto hold: deterministic screener produced no candidates"
+    if context.get("global_blocks"):
+        reason += f"; global blocks: {', '.join(context['global_blocks'])}"
+    if context.get("data_warnings"):
+        reason += f"; data warnings: {', '.join(context['data_warnings'][:5])}"
+    if context.get("maintenance_warnings"):
+        reason += f"; maintenance warnings: {', '.join(context['maintenance_warnings'][:5])}"
+    return {
+        "final_decision": "hold",
+        "symbol": context["symbols"][0],
+        "timeframe": context["decision_interval"],
+        "thesis": "No deterministic screener candidate.",
+        "price": None,
+        "stop_loss": None,
+        "take_profit": None,
+        "amount": 0.0,
+        "confidence": 0.0,
+        "risk_summary": reason,
+        "tool_summary": ["deterministic_screener:auto_hold"],
+        "scan_hash": context.get("scan_hash"),
+        "scan_artifact_path": context.get("scan_artifact_path"),
+    }
+
+
+def _compact_scan_context(context: dict[str, Any]) -> dict[str, Any] | None:
+    if context.get("screener_mode") != "deterministic":
+        return None
+    return {
+        "screener_mode": context.get("screener_mode"),
+        "scan_artifact_path": context.get("scan_artifact_path"),
+        "scan_hash": context.get("scan_hash"),
+        "candidates": context.get("screener_candidates", []),
+        "candidate_primitives": context.get("candidate_primitives", []),
+        "global_blocks": context.get("global_blocks", []),
+        "data_warnings": context.get("data_warnings", []),
+    }
+
+
+def _allowed_entry_candidates(context: dict[str, Any]) -> set[tuple[str, str]]:
+    allowed = set()
+    for item in context.get("candidate_primitives") or []:
+        if not isinstance(item, dict):
+            continue
+        symbol = item.get("symbol")
+        side = item.get("side")
+        if side not in {"long", "short"}:
+            continue
+        try:
+            allowed.add((normalize_symbol(str(symbol)), side))
+        except Exception:
+            continue
+    return allowed
+
+
+@contextmanager
+def _deterministic_candidate_allowlist_env(context: dict[str, Any]) -> Iterator[None]:
+    old_mode = os.environ.get("TRADERBOT_SCREENER_MODE")
+    old_candidates = os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES")
+    payload = [
+        {"symbol": item.get("symbol"), "side": item.get("side")}
+        for item in context.get("candidate_primitives") or []
+        if isinstance(item, dict) and item.get("side") in {"long", "short"}
+    ]
+    os.environ["TRADERBOT_SCREENER_MODE"] = "deterministic"
+    os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"] = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    try:
+        yield
+    finally:
+        _restore_env("TRADERBOT_SCREENER_MODE", old_mode)
+        _restore_env("TRADERBOT_DETERMINISTIC_CANDIDATES", old_candidates)
+
+
 def _restore_env(name: str, value: str | None) -> None:
     if value is None:
         os.environ.pop(name, None)
@@ -265,19 +473,45 @@ def _required_path(path: Path | None) -> Path:
     return Path(path)
 
 
-def _validate_decision_exchange_consistency(decision: Any, agent_exchange_events: list[dict[str, Any]]) -> None:
+def _validate_decision_exchange_consistency(
+    decision: Any,
+    agent_exchange_events: list[dict[str, Any]],
+    *,
+    allow_hold_position_closes: bool = True,
+    allowed_entry_candidates: set[tuple[str, str]] | None = None,
+    strict_entry_events: bool = False,
+) -> None:
     if not isinstance(decision, dict):
         return
     final_decision = str(decision.get("final_decision", "")).lower()
     event_types = [str(event.get("type", "")) for event in agent_exchange_events]
     place_order_events = [event for event in agent_exchange_events if str(event.get("type", "")) == "place_order"]
     if final_decision in {"long", "short"}:
+        if allowed_entry_candidates is not None:
+            try:
+                candidate_key = (normalize_symbol(str(decision.get("symbol") or "")), final_decision)
+            except Exception:
+                candidate_key = ("", final_decision)
+            if candidate_key not in allowed_entry_candidates:
+                raise RuntimeError(f"{final_decision} decision is not in deterministic screener candidates")
         if len(place_order_events) != 1:
             raise RuntimeError(f"{final_decision} decision did not produce a place_order exchange event")
         if not _place_order_event_matches_decision(place_order_events[0], decision, final_decision):
             raise RuntimeError(f"{final_decision} decision does not match the place_order exchange event")
+        if strict_entry_events:
+            disallowed = []
+            for event in agent_exchange_events:
+                event_type = str(event.get("type", ""))
+                if event_type == "place_order":
+                    continue
+                if event_type == "set_leverage" and _set_leverage_event_matches_decision(event, decision):
+                    continue
+                disallowed.append(event_type)
+            if disallowed:
+                raise RuntimeError(f"{final_decision} decision produced disallowed exchange events: {', '.join(disallowed)}")
     if final_decision == "hold":
-        disallowed = [event_type for event_type in event_types if event_type != "position_closed"]
+        allowed = {"position_closed"} if allow_hold_position_closes else set()
+        disallowed = [event_type for event_type in event_types if event_type not in allowed]
         if disallowed:
             raise RuntimeError(f"hold decision produced disallowed exchange events: {', '.join(disallowed)}")
 
@@ -321,6 +555,13 @@ def _place_order_event_matches_decision(event: dict[str, Any], decision: dict[st
         if not math.isclose(payload_value, decision_value, rel_tol=1e-6, abs_tol=1e-8):
             return False
     return True
+
+
+def _set_leverage_event_matches_decision(event: dict[str, Any], decision: dict[str, Any]) -> bool:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    if str(payload.get("category", "")).lower() != "linear":
+        return False
+    return _symbols_match(payload.get("symbol"), decision.get("symbol"))
 
 
 def _optional_float(value: Any) -> float | None:
@@ -402,6 +643,7 @@ def _config_dict(config: ExchangeReplayConfig) -> dict[str, Any]:
         "state_path": str(config.state_path),
         "events_path": str(config.events_path),
         "replay_path": str(config.replay_path),
+        "screener_mode": config.screener_mode,
     }
 
 

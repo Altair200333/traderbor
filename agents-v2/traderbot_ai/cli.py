@@ -199,6 +199,7 @@ def cmd_exchange_replay(args: argparse.Namespace) -> None:
         state_path=args.state_path,
         events_path=args.events_path,
         replay_path=args.replay_path,
+        screener_mode=args.screener_mode,
     )
     provider_name = args.decision_provider or ("hold" if args.decision_mode == "hold" else "openai-agents")
     if args.decision_mode == "hold" and provider_name != "hold":
@@ -209,7 +210,7 @@ def cmd_exchange_replay(args: argparse.Namespace) -> None:
     elif provider_name == "openai-agents":
         settings = replace(load_settings(), market_data_mode="cache", enable_codex_tool=False)
         session_name = args.session or f"{config.run_id}-agent"
-        provider = OpenAIAgentsDecisionProvider(settings=settings, session_name=session_name, max_turns=args.max_turns)
+        provider = OpenAIAgentsDecisionProvider(settings=settings, session_name=session_name, max_turns=args.max_turns, screener_mode=config.screener_mode)
     elif provider_name == "codex-cli-mcp":
         if args.codex_use_existing_mcp_config and not args.codex_use_user_config:
             _dump({"ok": False, "error": "--codex-use-existing-mcp-config requires --codex-use-user-config"})
@@ -219,6 +220,7 @@ def cmd_exchange_replay(args: argparse.Namespace) -> None:
         provider = CodexCliMcpDecisionProvider(
             settings=settings,
             session_name=session_name,
+            screener_mode=config.screener_mode,
             options=CodexCliOptions(
                 model=args.codex_model,
                 reasoning_effort=args.codex_reasoning_effort,
@@ -381,6 +383,7 @@ def build_parser() -> argparse.ArgumentParser:
     exchange_replay.add_argument("--max-turns", type=int, default=12)
     exchange_replay.add_argument("--decision-mode", choices=["agent", "hold"], default="agent", help="Compatibility alias. Use --decision-provider for new runs.")
     exchange_replay.add_argument("--decision-provider", choices=["openai-agents", "codex-cli-mcp", "hold"], help="Decision provider for replay.")
+    exchange_replay.add_argument("--screener-mode", choices=["off", "deterministic", "legacy-self-screen"], default="off", help="Deterministic runner-owned screener mode. Default preserves legacy provider-side screening.")
     exchange_replay.add_argument("--codex-model", help="Model for --decision-provider codex-cli-mcp. If omitted, Codex CLI chooses its configured/default model.")
     exchange_replay.add_argument("--codex-reasoning-effort", choices=["low", "medium", "high", "xhigh"], help="Codex model_reasoning_effort config override.")
     exchange_replay.add_argument("--codex-profile", help="Codex config profile for --decision-provider codex-cli-mcp.")

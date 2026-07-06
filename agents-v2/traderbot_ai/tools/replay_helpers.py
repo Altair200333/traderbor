@@ -5,19 +5,80 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
-from traderbot_ai.mcp.momentum import get_candidate_detail_impl, scan_momentum_universe_impl
+from traderbot_ai.screener.artifacts import write_scan_artifacts
+from traderbot_ai.screener.market import normalize_symbol
+from traderbot_ai.screener.render import to_markdown_table
+from traderbot_ai.screener.screener import get_setup_digest as get_setup_digest_impl
+from traderbot_ai.screener.screener import scan as scan_screener
+from traderbot_ai.screener.state import state_from_wallet_and_events
+from traderbot_ai.simulator.clock import guarded_simulation_as_of
+from traderbot_ai.simulator.market_cache import DEFAULT_CACHE_PATH
 from traderbot_ai.tools.exchange import _agent_tool_response, get_wallet_impl
 from traderbot_ai.tools.market import parse_time_ms
 
 
 def scan_momentum_universe(symbols: list[str] | str, as_of: str | int | float, decision_interval: str = "4h") -> dict[str, Any]:
     """Compact deterministic coarse scan for replay momentum candidates."""
-    return scan_momentum_universe_impl(symbols=symbols, as_of=as_of, decision_interval=decision_interval)
+    try:
+        as_of_ms = parse_time_ms(as_of)
+        if as_of_ms is None:
+            return {"ok": False, "error": "as_of is required for scan_momentum_universe"}
+        wallet = _agent_tool_response(get_wallet_impl(symbols=_symbols_csv(symbols), as_of=as_of_ms, mark_interval="1m"))
+        state = state_from_wallet_and_events(wallet, _read_exchange_events(), as_of_ms)
+        result = scan_screener(
+            symbols=symbols,
+            as_of_ms=as_of_ms,
+            state=state,
+            cache_path=os.getenv("TRADERBOT_MARKET_CACHE_PATH") or DEFAULT_CACHE_PATH,
+        )
+        artifact = _maybe_write_scan_artifact(result)
+        rows = [row.model_dump(mode="json") for row in result.symbols]
+        fresh_symbol_count = sum(1 for row in result.symbols if row.status == "ok")
+        return {
+            "ok": fresh_symbol_count > 0,
+            "error": None if fresh_symbol_count > 0 else "no fresh 1h candles at as_of",
+            "as_of_ms": result.as_of_ms,
+            "decision_interval": decision_interval,
+            "source": "local_cache",
+            "fresh_symbol_count": fresh_symbol_count,
+            "candidates": [row for row in rows if row.get("candidate") in {"long", "short"}],
+            "rejected": [row for row in rows if row.get("candidate") not in {"long", "short"}],
+            "global_blocks": result.global_blocks,
+            "data_warnings": result.data_warnings,
+            "btc_roc_4h": result.btc_roc_4h,
+            "markdown": to_markdown_table(result),
+            "scan_hash": artifact.get("sha256"),
+            "scan_artifact_path": artifact.get("artifact_path"),
+        }
+    except Exception as error:
+        return {"ok": False, "error": str(error)}
 
 
 def get_candidate_detail(symbol: str, side: Literal["long", "short"], as_of: str | int | float) -> dict[str, Any]:
     """Compact deterministic 1h detail for one shortlisted momentum candidate."""
-    return get_candidate_detail_impl(symbol=symbol, side=side, as_of=as_of)
+    return get_setup_digest(symbol=symbol, side=side, as_of=as_of)
+
+
+def get_setup_digest(symbol: str, side: Literal["long", "short"], as_of: str | int | float) -> dict[str, Any]:
+    """Compact deterministic setup digest for one shortlisted momentum candidate."""
+    try:
+        allow_error = _deterministic_candidate_error(symbol, side)
+        if allow_error is not None:
+            return allow_error
+        as_of_ms = guarded_simulation_as_of(as_of)
+        if as_of_ms is None:
+            return {"ok": False, "error": "as_of is required for get_setup_digest"}
+        wallet = _agent_tool_response(get_wallet_impl(symbols=symbol, as_of=as_of_ms, mark_interval="1m"))
+        state = state_from_wallet_and_events(wallet, _read_exchange_events(), as_of_ms)
+        return get_setup_digest_impl(
+            symbol=symbol,
+            side=side,
+            as_of_ms=as_of_ms,
+            state=state,
+            cache_path=os.getenv("TRADERBOT_MARKET_CACHE_PATH") or DEFAULT_CACHE_PATH,
+        )
+    except Exception as error:
+        return {"ok": False, "symbol": symbol, "side": side, "error": str(error)}
 
 
 def get_wallet_compact(symbols: str = "", as_of: str | int | float | None = None, mark_interval: str = "1m") -> dict[str, Any]:
@@ -88,3 +149,76 @@ def _event_replay_time_ms(record: dict[str, Any]) -> int | None:
             except Exception:
                 continue
     return None
+
+
+def _read_exchange_events() -> list[dict[str, Any]]:
+    path_value = os.getenv("TRADERBOT_EXCHANGE_EVENTS_PATH")
+    if not path_value:
+        return []
+    path = Path(path_value)
+    if not path.exists():
+        return []
+    events = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return events
+
+
+def _deterministic_candidate_error(symbol: str, side: str) -> dict[str, Any] | None:
+    if os.getenv("TRADERBOT_SCREENER_MODE") != "deterministic":
+        return None
+    raw = os.getenv("TRADERBOT_DETERMINISTIC_CANDIDATES")
+    if not raw:
+        return {
+            "ok": False,
+            "symbol": symbol,
+            "side": side,
+            "screener_mode": "deterministic",
+            "error": "deterministic candidate allowlist is not configured",
+        }
+    try:
+        requested = (normalize_symbol(symbol), side)
+        allowed = {
+            (normalize_symbol(str(item.get("symbol") or "")), str(item.get("side") or ""))
+            for item in json.loads(raw)
+            if isinstance(item, dict)
+        }
+    except Exception as error:
+        return {
+            "ok": False,
+            "symbol": symbol,
+            "side": side,
+            "screener_mode": "deterministic",
+            "error": f"invalid deterministic candidate allowlist: {error}",
+        }
+    if requested in allowed:
+        return None
+    return {
+        "ok": False,
+        "symbol": symbol,
+        "side": side,
+        "screener_mode": "deterministic",
+        "error": "setup digest is only available for runner-provided deterministic candidates",
+        "allowed_candidates": [{"symbol": item[0], "side": item[1]} for item in sorted(allowed)],
+    }
+
+
+def _symbols_csv(symbols: list[str] | str) -> str:
+    if isinstance(symbols, str):
+        return symbols
+    return ",".join(str(symbol) for symbol in symbols)
+
+
+def _maybe_write_scan_artifact(result: Any) -> dict[str, str]:
+    run_id = os.getenv("TRADERBOT_RUN_ID") or os.getenv("TRADERBOT_MCP_RUN_ID")
+    if not run_id:
+        return {}
+    try:
+        return write_scan_artifacts(result, run_id)
+    except Exception:
+        return {}

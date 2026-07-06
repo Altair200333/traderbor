@@ -21,11 +21,12 @@ def _close_session(session: Any) -> None:
 class OpenAIAgentsDecisionProvider:
     name = "openai-agents"
 
-    def __init__(self, *, settings: Settings, session_name: str, max_turns: int) -> None:
+    def __init__(self, *, settings: Settings, session_name: str, max_turns: int, screener_mode: str = "off") -> None:
         self._settings = settings
         self._session_name = session_name
         self._max_turns = max_turns
-        self._agent = build_trading_agent(settings, exchange_replay=True)
+        self._screener_mode = screener_mode
+        self._agent = build_trading_agent(settings, exchange_replay=True, screener_mode=screener_mode)
 
     def decide(self, context: dict[str, Any]) -> dict[str, Any]:
         step_session = get_session(

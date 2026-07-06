@@ -5,11 +5,15 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from traderbot_ai.agents.trading import build_tools
 from traderbot_ai.cli import build_parser
 from traderbot_ai.config import Settings
 from traderbot_ai.exchange import SimulatedExchange, SimulatedExchangeBackend, create_exchange_backend
+from traderbot_ai.screener.config import ScreenerConfig
+from traderbot_ai.screener.plan import PlanPrimitives
+from traderbot_ai.screener.screener import ScanResult, SymbolRow
 from traderbot_ai.simulator.clock import (
     clear_file_simulation_clock_state,
     clear_process_simulation_clock_state,
@@ -19,7 +23,7 @@ from traderbot_ai.simulator.clock import (
     set_process_simulation_clock_state,
     set_simulation_clock_state,
 )
-from traderbot_ai.simulator.exchange_replay import build_exchange_replay_config, exchange_tool_environment, run_exchange_replay
+from traderbot_ai.simulator.exchange_replay import _apply_runner_maintenance, _validate_decision_exchange_consistency, build_exchange_replay_config, exchange_tool_environment, run_exchange_replay
 from traderbot_ai.simulator.market_cache import Candle, LocalMarketCache
 from traderbot_ai.tools.exchange import _agent_tool_response, place_order_impl, reset_exchange_impl, set_leverage_impl, settle_exchange_impl
 
@@ -78,6 +82,111 @@ class ExchangeReplayTests(unittest.TestCase):
         self.assertNotIn("get_order_book", names)
         self.assertNotIn("codex_code_worker", names)
 
+    def test_deterministic_exchange_replay_tools_hide_broad_scan_raw_candles_and_maintenance_writes(self) -> None:
+        settings = Settings(
+            model="test",
+            vision_model="test",
+            reasoning_effort="low",
+            paper_balance_usdt=1000.0,
+            market_data_mode="live",
+            openai_api_key_present=False,
+            enable_codex_tool=True,
+            disable_tracing=True,
+        )
+
+        names = {getattr(tool, "name", "") for tool in build_tools(settings, exchange_replay=True, screener_mode="deterministic")}
+
+        self.assertIn("get_current_price", names)
+        self.assertIn("get_setup_digest", names)
+        self.assertIn("get_wallet_compact", names)
+        self.assertIn("get_recent_trade_events", names)
+        self.assertIn("get_wallet", names)
+        self.assertIn("place_order", names)
+        self.assertIn("set_leverage", names)
+        self.assertIn("validate_order", names)
+        self.assertIn("calculate_position_size", names)
+        self.assertNotIn("get_candles", names)
+        self.assertNotIn("scan_momentum_universe", names)
+        self.assertNotIn("get_candidate_detail", names)
+        self.assertNotIn("close_position", names)
+        self.assertNotIn("cancel_order", names)
+        self.assertNotIn("settle_exchange", names)
+
+    def test_deterministic_hold_rejects_provider_position_close_events(self) -> None:
+        decision = {"final_decision": "hold", "symbol": BTC, "amount": 0.0}
+        events = [{"type": "position_closed", "payload": {"symbol": BTC}}]
+
+        _validate_decision_exchange_consistency(decision, events, allow_hold_position_closes=True)
+        with self.assertRaisesRegex(RuntimeError, "hold decision produced disallowed exchange events"):
+            _validate_decision_exchange_consistency(decision, events, allow_hold_position_closes=False)
+
+    def test_deterministic_entry_validation_requires_runner_candidate_and_rejects_extra_writes(self) -> None:
+        decision = {
+            "final_decision": "long",
+            "symbol": BTC,
+            "amount": 100.0,
+            "stop_loss": 96.0,
+            "take_profit": 110.0,
+        }
+        place_order_event = {
+            "type": "place_order",
+            "payload": {
+                "category": "linear",
+                "symbol": BTC,
+                "side": "Buy",
+                "orderType": "Market",
+                "status": "Filled",
+                "qty": 1.0,
+                "price": 100.0,
+                "notional_usdt": 100.0,
+                "stopLoss": 96.0,
+                "takeProfit": 110.0,
+                "position": {"category": "linear", "notional_usdt": 100.0},
+            },
+        }
+        leverage_event = {"type": "set_leverage", "payload": {"category": "linear", "symbol": BTC}}
+
+        _validate_decision_exchange_consistency(
+            decision,
+            [leverage_event, place_order_event],
+            allowed_entry_candidates={(BTC, "long")},
+            strict_entry_events=True,
+        )
+        with self.assertRaisesRegex(RuntimeError, "not in deterministic screener candidates"):
+            _validate_decision_exchange_consistency(
+                decision,
+                [place_order_event],
+                allowed_entry_candidates={(ETH, "long")},
+                strict_entry_events=True,
+            )
+        with self.assertRaisesRegex(RuntimeError, "produced disallowed exchange events"):
+            _validate_decision_exchange_consistency(
+                decision,
+                [place_order_event, {"type": "position_closed", "payload": {"symbol": ETH}}],
+                allowed_entry_candidates={(BTC, "long")},
+                strict_entry_events=True,
+            )
+
+    def test_runner_maintenance_surfaces_impulse_break_data_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = LocalMarketCache(Path(tmp) / "market.sqlite3")
+            exchange = SimulatedExchange(Path(tmp) / "exchange.json", Path(tmp) / "events.jsonl", cache=cache)
+            wallet = {
+                "open_positions": [
+                    {
+                        "symbol": BTC,
+                        "side": "Buy",
+                        "opened_at_ms": BASE_MS,
+                        "position_id": "p1",
+                    }
+                ]
+            }
+
+            actions, warnings = _apply_runner_maintenance(exchange, cache, wallet, BASE_MS + FOUR_HOURS_MS, 0.0, ScreenerConfig())
+
+        self.assertEqual(actions, [])
+        self.assertTrue(any("impulse_break_unchecked" in warning for warning in warnings))
+
     def test_exchange_replay_cli_has_hold_decision_mode(self) -> None:
         args = build_parser().parse_args(
             [
@@ -93,6 +202,21 @@ class ExchangeReplayTests(unittest.TestCase):
 
         self.assertEqual(args.command, "exchange-replay")
         self.assertEqual(args.decision_mode, "hold")
+
+    def test_exchange_replay_cli_has_screener_mode(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "exchange-replay",
+                "--start-time",
+                "2024-01-01T00:00:00Z",
+                "--end-time",
+                "2024-01-01T04:00:00Z",
+                "--screener-mode",
+                "deterministic",
+            ]
+        )
+
+        self.assertEqual(args.screener_mode, "deterministic")
 
     def test_agent_tool_response_compacts_state_and_reports_runtime_overrides(self) -> None:
         old_fee = os.environ.get("TRADERBOT_EXCHANGE_FEE_RATE")
@@ -445,6 +569,229 @@ class ExchangeReplayTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(result["final_wallet"]["balances"][0]["asset"], "BTC")
 
+    def test_run_exchange_replay_deterministic_screener_auto_hold_skips_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = LocalMarketCache(Path(tmp) / "market.sqlite3")
+            cache.upsert_candles([candle_at_close(BTC, BASE_MS, 50_000.0, 50_100.0, 49_900.0, 50_000.0)])
+            config = build_exchange_replay_config(
+                symbols=[BTC],
+                start_time=BASE_MS,
+                end_time=BASE_MS + FOUR_HOURS_MS,
+                state_path=Path(tmp) / "exchange.json",
+                events_path=Path(tmp) / "exchange-events.jsonl",
+                replay_path=Path(tmp) / "replay.jsonl",
+                screener_mode="deterministic",
+                run_id="deterministic-empty",
+            )
+            scan_result = _scan_result([SymbolRow(symbol=BTC, status="insufficient_data", failed_gates=["insufficient_data"])], candidates=[])
+
+            def decide(_: dict) -> dict:
+                raise AssertionError("provider should not be called")
+
+            with patch("traderbot_ai.simulator.exchange_replay.run_screener", return_value=scan_result), patch(
+                "traderbot_ai.simulator.exchange_replay.write_scan_artifacts",
+                return_value={"artifact_path": str(Path(tmp) / "scan.json"), "sha256": "hash"},
+            ):
+                result = run_exchange_replay(config=config, decide=decide, cache=cache)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["steps"][0]["decision"]["final_decision"], "hold")
+        self.assertEqual(result["steps"][0]["decision"]["scan_hash"], "hash")
+        self.assertEqual(result["steps"][0]["scan"]["scan_hash"], "hash")
+        self.assertEqual(result["steps"][0]["agent_exchange_events"], [])
+
+    def test_run_exchange_replay_deterministic_screener_passes_context_when_candidate_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = LocalMarketCache(Path(tmp) / "market.sqlite3")
+            cache.upsert_candles([candle_at_close(BTC, BASE_MS, 50_000.0, 50_100.0, 49_900.0, 50_000.0)])
+            config = build_exchange_replay_config(
+                symbols=[BTC],
+                start_time=BASE_MS,
+                end_time=BASE_MS + FOUR_HOURS_MS,
+                state_path=Path(tmp) / "exchange.json",
+                events_path=Path(tmp) / "exchange-events.jsonl",
+                replay_path=Path(tmp) / "replay.jsonl",
+                screener_mode="deterministic",
+                run_id="deterministic-candidate",
+            )
+            row = SymbolRow(
+                symbol=BTC,
+                status="ok",
+                close=100.0,
+                signal_candidate_before_state="long",
+                candidate="long",
+                plan=PlanPrimitives(
+                    pattern_used="P1",
+                    boundary_price=99.0,
+                    invalidation_price=98.4,
+                    d_atr=0.02,
+                    d_struct=0.016,
+                    d_final=0.02,
+                    stop_feasible=True,
+                    tp_rr_default=2.5,
+                    ref_entry=100.0,
+                ),
+            )
+            scan_result = _scan_result([row], candidates=[BTC])
+            contexts = []
+            old_candidates_env = os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES")
+
+            def decide(context: dict) -> dict:
+                contexts.append(context)
+                self.assertEqual(os.environ.get("TRADERBOT_SCREENER_MODE"), "deterministic")
+                self.assertIn(BTC, os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES", ""))
+                return {"final_decision": "hold", "symbol": BTC, "amount": 0.0}
+
+            with patch("traderbot_ai.simulator.exchange_replay.run_screener", return_value=scan_result), patch(
+                "traderbot_ai.simulator.exchange_replay.write_scan_artifacts",
+                return_value={"artifact_path": str(Path(tmp) / "scan.json"), "sha256": "hash"},
+            ):
+                result = run_exchange_replay(config=config, decide=decide, cache=cache)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(contexts), 1)
+        self.assertEqual(contexts[0]["screener_mode"], "deterministic")
+        self.assertIn("scan_markdown", contexts[0])
+        self.assertEqual(contexts[0]["scan_hash"], "hash")
+        self.assertEqual(contexts[0]["screener_candidates"], [BTC])
+        self.assertEqual(contexts[0]["candidate_primitives"][0]["side"], "long")
+        self.assertEqual(os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES"), old_candidates_env)
+
+    def test_deterministic_place_order_impl_rejects_non_candidate_before_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "exchange.json"
+            events_path = Path(tmp) / "exchange-events.jsonl"
+            old_mode = os.environ.get("TRADERBOT_SCREENER_MODE")
+            old_candidates = os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES")
+            previous_process_clock = process_simulation_clock_ms()
+            previous_file_clock = file_simulation_clock_ms()
+            try:
+                os.environ["TRADERBOT_SCREENER_MODE"] = "deterministic"
+                os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"] = json.dumps([{"symbol": BTC, "side": "long"}])
+                set_simulation_clock_state(BASE_MS)
+                with exchange_tool_environment(state_path, events_path, backend="simulated", fee_rate=0.001, execution_interval="1m"):
+                    reset_exchange_impl('{"USDT": 1000}', as_of=BASE_MS)
+                    result = place_order_impl(
+                        "linear",
+                        BTC,
+                        "Sell",
+                        "Market",
+                        qty=1.0,
+                        takeProfit=90.0,
+                        stopLoss=104.0,
+                        orderLinkId="wrong-side",
+                        as_of=BASE_MS,
+                    )
+                    event_text = events_path.read_text(encoding="utf-8")
+            finally:
+                if old_mode is None:
+                    os.environ.pop("TRADERBOT_SCREENER_MODE", None)
+                else:
+                    os.environ["TRADERBOT_SCREENER_MODE"] = old_mode
+                if old_candidates is None:
+                    os.environ.pop("TRADERBOT_DETERMINISTIC_CANDIDATES", None)
+                else:
+                    os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"] = old_candidates
+                if previous_file_clock is None:
+                    clear_file_simulation_clock_state()
+                else:
+                    set_file_simulation_clock_state(previous_file_clock)
+                if previous_process_clock is None:
+                    clear_process_simulation_clock_state()
+                else:
+                    set_process_simulation_clock_state(previous_process_clock)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("only available for runner-provided deterministic candidates", result["error"])
+        event_types = [json.loads(line)["type"] for line in event_text.splitlines()]
+        self.assertNotIn("place_order", event_types)
+
+    def test_run_exchange_replay_deterministic_runner_max_hold_close_is_not_agent_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = LocalMarketCache(Path(tmp) / "market.sqlite3")
+            cache.upsert_candles(
+                [
+                    candle_at_close(BTC, BASE_MS + minute * 60_000, 100.0, 100.2, 99.8, 100.0)
+                    for minute in range(0, 28 * 60 + 1)
+                ]
+            )
+            config = build_exchange_replay_config(
+                symbols=[BTC],
+                start_time=BASE_MS,
+                end_time=BASE_MS + 7 * FOUR_HOURS_MS,
+                state_path=Path(tmp) / "exchange.json",
+                events_path=Path(tmp) / "exchange-events.jsonl",
+                replay_path=Path(tmp) / "replay.jsonl",
+                screener_mode="deterministic",
+                run_id="deterministic-max-hold",
+            )
+            row = SymbolRow(
+                symbol=BTC,
+                status="ok",
+                close=100.0,
+                signal_candidate_before_state="long",
+                candidate="long",
+                plan=PlanPrimitives(
+                    pattern_used="P2",
+                    boundary_price=99.0,
+                    invalidation_price=98.0,
+                    d_atr=0.02,
+                    d_struct=0.02,
+                    d_final=0.02,
+                    stop_feasible=True,
+                    tp_rr_default=2.0,
+                    ref_entry=100.0,
+                ),
+            )
+            candidate_scan = _scan_result([row], candidates=[BTC])
+            empty_scan = _scan_result([SymbolRow(symbol=BTC, status="ok", close=100.0)], candidates=[])
+            scans = [candidate_scan, empty_scan, empty_scan, empty_scan, empty_scan, empty_scan, empty_scan]
+            provider_calls = []
+
+            def decide(context: dict) -> dict:
+                provider_calls.append(context["as_of_ms"])
+                place_order_impl(
+                    "linear",
+                    BTC,
+                    "Buy",
+                    "Market",
+                    qty=1.0,
+                    takeProfit=104.0,
+                    stopLoss=98.0,
+                    orderLinkId="deterministic-max-hold-btc-long",
+                    as_of=context["as_of_ms"],
+                    fee_rate=context["fee_rate"],
+                )
+                return {
+                    "final_decision": "long",
+                    "symbol": BTC,
+                    "timeframe": "4h",
+                    "thesis": "test entry",
+                    "price": 100.0,
+                    "stop_loss": 98.0,
+                    "take_profit": 104.0,
+                    "amount": 100.0,
+                    "confidence": 0.7,
+                    "risk_summary": "test",
+                    "tool_summary": ["place_order"],
+                    "worklog_path": None,
+                }
+
+            with patch("traderbot_ai.simulator.exchange_replay.run_screener", side_effect=scans), patch(
+                "traderbot_ai.simulator.exchange_replay.write_scan_artifacts",
+                return_value={"artifact_path": str(Path(tmp) / "scan.json"), "sha256": "hash"},
+            ):
+                result = run_exchange_replay(config=config, decide=decide, cache=cache)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(provider_calls, [BASE_MS])
+        max_hold_step = result["steps"][6]
+        self.assertEqual(max_hold_step["maintenance_actions"][0]["reason"], "max_hold")
+        self.assertEqual([event["type"] for event in max_hold_step["maintenance_exchange_events"]], ["position_closed"])
+        self.assertEqual(max_hold_step["agent_exchange_events"], [])
+        self.assertEqual(max_hold_step["decision"]["final_decision"], "hold")
+        self.assertEqual(result["final_wallet"]["open_positions"], [])
+
     def test_run_exchange_replay_rejects_mismatched_exchange_and_replay_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             exchange_cache = LocalMarketCache(Path(tmp) / "exchange-market.sqlite3")
@@ -661,6 +1008,20 @@ class ExchangeReplayTests(unittest.TestCase):
             replay_events = [json.loads(line)["type"] for line in replay_path.read_text(encoding="utf-8").splitlines()]
             self.assertTrue(result["ok"])
             self.assertEqual(replay_events[-1], "replay_completed")
+
+
+def _scan_result(rows: list[SymbolRow], candidates: list[str]) -> ScanResult:
+    return ScanResult(
+        as_of_ms=BASE_MS,
+        as_of_iso="2024-01-01T00:00:00+00:00",
+        screener_version="test",
+        config_hash="cfg",
+        symbols=rows,
+        candidates=candidates,
+        global_blocks=[],
+        btc_roc_4h=0.0,
+        data_warnings=[],
+    )
 
 
 if __name__ == "__main__":

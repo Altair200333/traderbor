@@ -34,6 +34,8 @@ def get_candles(
     end_time: str | int | float | None = None,
 ) -> dict[str, Any]:
     """Read closed candles from the configured local cache."""
+    if _deterministic_screener_mode():
+        return _deterministic_reject("get_candles", "raw candles are disabled; use runner scan table and get_setup_digest for listed candidates")
     return get_cached_candles_impl(
         symbol=symbol,
         interval=interval,
@@ -67,12 +69,19 @@ def get_cache_status_compact() -> dict[str, Any]:
 
 def scan_momentum_universe(symbols: list[str] | str, as_of: str | int | float, decision_interval: str = "4h") -> dict[str, Any]:
     """Compact deterministic coarse scan for replay momentum candidates."""
+    if _deterministic_screener_mode():
+        return _deterministic_reject("scan_momentum_universe", "broad scan already ran in the replay runner")
     return replay_helpers.scan_momentum_universe(symbols=symbols, as_of=as_of, decision_interval=decision_interval)
 
 
 def get_candidate_detail(symbol: str, side: Literal["long", "short"], as_of: str | int | float) -> dict[str, Any]:
     """Compact deterministic 1h detail for one shortlisted momentum candidate."""
     return replay_helpers.get_candidate_detail(symbol=symbol, side=side, as_of=as_of)
+
+
+def get_setup_digest(symbol: str, side: Literal["long", "short"], as_of: str | int | float) -> dict[str, Any]:
+    """Canonical deterministic setup digest for one shortlisted momentum candidate."""
+    return replay_helpers.get_setup_digest(symbol=symbol, side=side, as_of=as_of)
 
 
 def get_recent_trade_events(as_of: str | int | float, lookback_hours: int = 168, limit: int = 200) -> dict[str, Any]:
@@ -240,6 +249,10 @@ def place_order(
     if preflight is not None:
         _audit_write("place_order", inputs, preflight)
         return preflight
+    preflight = _deterministic_place_order_error(inputs)
+    if preflight is not None:
+        _audit_write("place_order", inputs, preflight)
+        return preflight
     risk_validation = _validate_place_order_risk(inputs)
     if risk_validation is not None and risk_validation.get("ok") is not True:
         result = {"ok": False, "error": "risk validation failed before place_order", "risk_validation": risk_validation}
@@ -271,6 +284,10 @@ def cancel_order(
         "interval": interval,
         "fee_rate": fee_rate,
     }
+    if _deterministic_screener_mode():
+        result = _deterministic_reject("cancel_order", "runner-owned deterministic mode does not allow provider cancels")
+        _audit_write("cancel_order", inputs, result)
+        return result
     preflight = _require_write_time("cancel_order", as_of)
     if preflight is not None:
         _audit_write("cancel_order", inputs, preflight)
@@ -301,6 +318,10 @@ def close_position(
         "mark_interval": mark_interval,
         "fee_rate": fee_rate,
     }
+    if _deterministic_screener_mode():
+        result = _deterministic_reject("close_position", "runner-owned deterministic mode does not allow provider maintenance closes")
+        _audit_write("close_position", inputs, result)
+        return result
     preflight = _require_write_time("close_position", as_of)
     if preflight is not None:
         _audit_write("close_position", inputs, preflight)
@@ -316,10 +337,43 @@ def _require_write_time(tool_name: str, as_of: str | int | float | None) -> dict
     return None
 
 
+def _deterministic_screener_mode() -> bool:
+    return os.getenv("TRADERBOT_SCREENER_MODE") == "deterministic"
+
+
+def _deterministic_reject(tool_name: str, reason: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "tool": tool_name,
+        "screener_mode": "deterministic",
+        "error": reason,
+    }
+
+
 def _require_order_link_id(order_link_id: str | None) -> dict[str, Any] | None:
     if order_link_id is None or str(order_link_id).strip() == "":
         return {"ok": False, "error": "place_order requires idempotent orderLinkId in exchange replay MCP mode"}
     return None
+
+
+def _deterministic_place_order_error(inputs: dict[str, Any]) -> dict[str, Any] | None:
+    if not _deterministic_screener_mode():
+        return None
+    if bool(inputs.get("reduceOnly")):
+        return _deterministic_reject("place_order", "runner-owned deterministic mode does not allow reduce-only provider orders")
+    if str(inputs.get("category") or "").lower() != "linear":
+        return _deterministic_reject("place_order", "runner-owned deterministic mode only allows linear finalist entries")
+    side = str(inputs.get("side") or "").lower()
+    candidate_side = "long" if side in {"buy", "long"} else "short" if side in {"sell", "short"} else ""
+    if not candidate_side:
+        return _deterministic_reject("place_order", f"unsupported deterministic entry side: {inputs.get('side')}")
+    allow_error = replay_helpers._deterministic_candidate_error(str(inputs.get("symbol") or ""), candidate_side)
+    if allow_error is None:
+        return None
+    result = dict(allow_error)
+    result["tool"] = "place_order"
+    result["error"] = "place_order is only available for runner-provided deterministic candidates"
+    return result
 
 
 def _validate_place_order_risk(inputs: dict[str, Any]) -> dict[str, Any] | None:

@@ -56,6 +56,7 @@ class McpToolTests(unittest.TestCase):
         names = {tool.name for tool in asyncio.run(server.mcp.list_tools())}
 
         self.assertIn("scan_momentum_universe", names)
+        self.assertIn("get_setup_digest", names)
         self.assertIn("get_candidate_detail", names)
         self.assertIn("get_wallet", names)
         self.assertIn("set_leverage", names)
@@ -175,9 +176,116 @@ class McpToolTests(unittest.TestCase):
                 _restore_env("TRADERBOT_MARKET_CACHE_PATH", old_cache)
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error"], "no fresh 4h candles at as_of")
+        self.assertEqual(result["error"], "no fresh 1h candles at as_of")
         self.assertEqual(result["fresh_symbol_count"], 0)
-        self.assertFalse(result["rejected"][0]["data_fresh"])
+        self.assertEqual(result["rejected"][0]["status"], "insufficient_data")
+
+    def test_deterministic_mcp_mode_blocks_raw_broad_and_maintenance_tools(self) -> None:
+        old_mode = os.environ.get("TRADERBOT_SCREENER_MODE")
+        try:
+            os.environ["TRADERBOT_SCREENER_MODE"] = "deterministic"
+            candles = mcp_tools.get_candles(BTC, interval="1h", as_of=BASE_MS, limit=170)
+            scan = mcp_tools.scan_momentum_universe([BTC], as_of=BASE_MS)
+            cancel = mcp_tools.cancel_order(order_id="o1", as_of=BASE_MS)
+            close = mcp_tools.close_position(position_id="p1", as_of=BASE_MS)
+        finally:
+            _restore_env("TRADERBOT_SCREENER_MODE", old_mode)
+
+        self.assertFalse(candles["ok"])
+        self.assertIn("raw candles are disabled", candles["error"])
+        self.assertFalse(scan["ok"])
+        self.assertIn("broad scan already ran", scan["error"])
+        self.assertFalse(cancel["ok"])
+        self.assertIn("does not allow provider cancels", cancel["error"])
+        self.assertFalse(close["ok"])
+        self.assertIn("does not allow provider maintenance closes", close["error"])
+
+    def test_deterministic_setup_digest_rejects_non_finalist(self) -> None:
+        old_mode = os.environ.get("TRADERBOT_SCREENER_MODE")
+        old_candidates = os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES")
+        try:
+            os.environ["TRADERBOT_SCREENER_MODE"] = "deterministic"
+            os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"] = json.dumps([{"symbol": BTC, "side": "long"}])
+            wrong_symbol = mcp_tools.get_setup_digest("ETHUSDT", "long", BASE_MS)
+            wrong_side = mcp_tools.get_candidate_detail(BTC, "short", BASE_MS)
+        finally:
+            _restore_env("TRADERBOT_SCREENER_MODE", old_mode)
+            _restore_env("TRADERBOT_DETERMINISTIC_CANDIDATES", old_candidates)
+
+        self.assertFalse(wrong_symbol["ok"])
+        self.assertIn("only available for runner-provided deterministic candidates", wrong_symbol["error"])
+        self.assertFalse(wrong_side["ok"])
+        self.assertIn("only available for runner-provided deterministic candidates", wrong_side["error"])
+
+    def test_deterministic_setup_digest_rejects_future_as_of_under_simulation_clock(self) -> None:
+        old_mode = os.environ.get("TRADERBOT_SCREENER_MODE")
+        old_candidates = os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES")
+        previous_process_clock = process_simulation_clock_ms()
+        previous_file_clock = file_simulation_clock_ms()
+        try:
+            clear_process_simulation_clock_state()
+            set_file_simulation_clock_state(BASE_MS)
+            os.environ["TRADERBOT_SCREENER_MODE"] = "deterministic"
+            os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"] = json.dumps([{"symbol": BTC, "side": "long"}])
+            result = mcp_tools.get_setup_digest(BTC, "long", BASE_MS + 1)
+        finally:
+            _restore_env("TRADERBOT_SCREENER_MODE", old_mode)
+            _restore_env("TRADERBOT_DETERMINISTIC_CANDIDATES", old_candidates)
+            if previous_file_clock is None:
+                clear_file_simulation_clock_state()
+            else:
+                set_file_simulation_clock_state(previous_file_clock)
+            if previous_process_clock is None:
+                clear_process_simulation_clock_state()
+            else:
+                set_process_simulation_clock_state(previous_process_clock)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("exceeds simulation clock", result["error"])
+
+    def test_deterministic_place_order_rejects_non_candidate_before_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state_path = tmp_path / "state.json"
+            events_path = tmp_path / "events.jsonl"
+            old_mode = os.environ.get("TRADERBOT_SCREENER_MODE")
+            old_candidates = os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES")
+            previous_process_clock = process_simulation_clock_ms()
+            previous_file_clock = file_simulation_clock_ms()
+            try:
+                os.environ["TRADERBOT_SCREENER_MODE"] = "deterministic"
+                os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"] = json.dumps([{"symbol": BTC, "side": "long"}])
+                set_simulation_clock_state(BASE_MS)
+                with exchange_tool_environment(state_path, events_path, backend="simulated", fee_rate=0.001, execution_interval="1m"):
+                    reset_exchange_impl('{"USDT": 1000}', as_of=BASE_MS)
+                    result = mcp_tools.place_order(
+                        "linear",
+                        BTC,
+                        "Sell",
+                        "Market",
+                        qty=1.0,
+                        takeProfit=90.0,
+                        stopLoss=104.0,
+                        orderLinkId="wrong-side",
+                        as_of=BASE_MS,
+                    )
+                    event_text = events_path.read_text(encoding="utf-8")
+            finally:
+                _restore_env("TRADERBOT_SCREENER_MODE", old_mode)
+                _restore_env("TRADERBOT_DETERMINISTIC_CANDIDATES", old_candidates)
+                if previous_file_clock is None:
+                    clear_file_simulation_clock_state()
+                else:
+                    set_file_simulation_clock_state(previous_file_clock)
+                if previous_process_clock is None:
+                    clear_process_simulation_clock_state()
+                else:
+                    set_process_simulation_clock_state(previous_process_clock)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("only available for runner-provided deterministic candidates", result["error"])
+        event_types = [json.loads(line)["type"] for line in event_text.splitlines()]
+        self.assertNotIn("place_order", event_types)
 
     def test_write_tools_require_as_of_and_order_link_id(self) -> None:
         missing_as_of = mcp_tools.place_order("linear", BTC, "Buy", "Market", qty=1.0, takeProfit=110.0, stopLoss=96.0, orderLinkId="o1")

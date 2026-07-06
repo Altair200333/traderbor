@@ -48,10 +48,12 @@ class CodexCliMcpDecisionProvider:
         settings: Settings,
         session_name: str,
         options: CodexCliOptions | None = None,
+        screener_mode: str = "off",
     ) -> None:
         self._settings = settings
         self._session_name = session_name
         self._options = options or CodexCliOptions()
+        self._screener_mode = screener_mode
 
     def decide(self, context: dict[str, Any]) -> dict[str, Any]:
         paths = self._step_paths(context)
@@ -60,8 +62,9 @@ class CodexCliMcpDecisionProvider:
         paths.schema_path.write_text(json.dumps(_trade_decision_output_schema(), indent=2), encoding="utf-8")
         prompt = self._build_prompt(context)
         paths.prompt_path.write_text(prompt, encoding="utf-8")
-        env = self._build_env()
-        command = self._build_command(paths)
+        screener_mode = _context_screener_mode(context, self._screener_mode)
+        env = self._build_env(screener_mode)
+        command = self._build_command(paths, screener_mode)
         result: subprocess.CompletedProcess[str] | None = None
         try:
             result = subprocess.run(
@@ -109,8 +112,10 @@ class CodexCliMcpDecisionProvider:
         return None
 
     def _build_prompt(self, context: dict[str, Any]) -> str:
-        system_prompt = build_trading_instructions(self._settings, exchange_replay=True)
+        screener_mode = _context_screener_mode(context, self._screener_mode)
+        system_prompt = build_trading_instructions(self._settings, exchange_replay=True, screener_mode=screener_mode)
         user_prompt = build_exchange_replay_prompt(context)
+        tool_order = _codex_tool_order_text(screener_mode)
         return f"""
 You are running Traderbot V2 through Codex CLI.
 
@@ -121,13 +126,7 @@ Do not use filesystem write tools or shell commands to mutate simulator state.
 The replay runner owns clock movement and settlement.
 
 Codex MCP tool order:
-1. Use get_wallet_compact before scanning. Use full get_wallet only if compact output is missing a specific fact needed for an entry or maintenance close.
-2. Use get_recent_trade_events for risk/cooldown reconstruction.
-3. Use scan_momentum_universe once for the broad symbol scan. This replaces raw per-symbol 4h get_candles calls for coarse screening.
-4. Use get_candidate_detail for at most 2 finalists. This replaces raw 1h get_candles calls for deep checks when it returns the needed facts.
-5. Use get_candles only as a fallback for missing screener/detail facts, never as the default broad scan.
-6. Use validate_order and calculate_position_size before any entry. calculate_position_size.amount is USDT notional; TradeDecision.amount is USDT notional; linear place_order.qty is base-asset quantity, so use qty = notional / current entry price. Do not pass USDT notional as linear qty and do not use marketUnit for linear orders.
-7. Then set_leverage and place_order only for a real long/short decision.
+{tool_order}
 
 System instructions:
 {system_prompt}
@@ -138,7 +137,7 @@ Replay step prompt:
 Return only the final JSON object matching the TradeDecision schema.
 """
 
-    def _build_command(self, paths: "_CodexStepPaths") -> list[str]:
+    def _build_command(self, paths: "_CodexStepPaths", screener_mode: str) -> list[str]:
         executable = shutil.which(self._options.codex_executable) or self._options.codex_executable
         command = [
             executable,
@@ -166,13 +165,13 @@ Return only the final JSON object matching the TradeDecision schema.
         if self._options.profile:
             command.extend(["--profile", self._options.profile])
         if self._options.include_mcp_config:
-            command.extend(self._mcp_config_overrides(paths))
+            command.extend(self._mcp_config_overrides(paths, screener_mode))
         command.append("-")
         return command
 
-    def _mcp_config_overrides(self, paths: "_CodexStepPaths") -> list[str]:
+    def _mcp_config_overrides(self, paths: "_CodexStepPaths", screener_mode: str) -> list[str]:
         prefix = f"mcp_servers.{self._options.mcp_server_name}"
-        env = self._mcp_env(paths)
+        env = self._mcp_env(paths, screener_mode)
         overrides = [
             "-c",
             f"{prefix}.command={_toml_string(self._options.python_executable)}",
@@ -191,18 +190,20 @@ Return only the final JSON object matching the TradeDecision schema.
             overrides.extend(["-c", f"{prefix}.env.{key}={_toml_string(value)}"])
         return overrides
 
-    def _build_env(self) -> dict[str, str]:
+    def _build_env(self, screener_mode: str) -> dict[str, str]:
         env = os.environ.copy()
         env.pop("OPENAI_API_KEY", None)
         _prepend_env_path(env, "PYTHONPATH", str(AGENTS_V2_ROOT))
+        env["TRADERBOT_SCREENER_MODE"] = screener_mode
         return env
 
-    def _mcp_env(self, paths: "_CodexStepPaths") -> dict[str, str]:
+    def _mcp_env(self, paths: "_CodexStepPaths", screener_mode: str) -> dict[str, str]:
         env = {
             "PYTHONPATH": _join_env_path(str(AGENTS_V2_ROOT), os.environ.get("PYTHONPATH")),
             "TRADERBOT_MCP_AUDIT_PATH": str(paths.audit_path),
             "TRADERBOT_MCP_RUN_ID": self._session_name,
             "TRADERBOT_MCP_STEP_ID": paths.audit_path.name.replace(".mcp-audit.jsonl", ""),
+            "TRADERBOT_SCREENER_MODE": screener_mode,
         }
         for key in (
             "TRADERBOT_EXCHANGE_BACKEND",
@@ -212,6 +213,7 @@ Return only the final JSON object matching the TradeDecision schema.
             "TRADERBOT_MARKET_CACHE_PATH",
             "TRADERBOT_EXCHANGE_EXECUTION_INTERVAL",
             "TRADERBOT_SIMULATION_CLOCK_PATH",
+            "TRADERBOT_DETERMINISTIC_CANDIDATES",
         ):
             value = os.environ.get(key)
             if value:
@@ -301,6 +303,29 @@ def _validate_strict_trade_decision_object(data: Any) -> None:
         raise ValueError(f"TradeDecision output missing required fields: {', '.join(missing)}")
     if extra:
         raise ValueError(f"TradeDecision output has unexpected fields: {', '.join(extra)}")
+
+
+def _context_screener_mode(context: dict[str, Any], default: str) -> str:
+    mode = str(context.get("screener_mode") or default or "off")
+    return mode if mode in {"off", "deterministic", "legacy-self-screen"} else "off"
+
+
+def _codex_tool_order_text(screener_mode: str) -> str:
+    if screener_mode == "deterministic":
+        return """1. Use the scan table and candidate_primitives from the replay prompt as the only broad screener result.
+2. Use get_wallet_compact and get_recent_trade_events for risk/cooldown reconstruction when needed.
+3. Use get_setup_digest for at most 2 listed deterministic candidates when extra structure is needed.
+4. Do not call scan_momentum_universe or get_candles; deterministic MCP mode rejects broad/raw market-data bypasses.
+5. Do not call close_position, cancel_order, or settle_exchange; runner-owned settlement and maintenance already ran.
+6. Use validate_order and calculate_position_size before any entry. calculate_position_size.amount is USDT notional; TradeDecision.amount is USDT notional; linear place_order.qty is base-asset quantity, so use qty = notional / current entry price. Do not pass USDT notional as linear qty and do not use marketUnit for linear orders.
+7. Then set_leverage and place_order only for a real long/short decision."""
+    return """1. Use get_wallet_compact before scanning. Use full get_wallet only if compact output is missing a specific fact needed for an entry or maintenance close.
+2. Use get_recent_trade_events for risk/cooldown reconstruction.
+3. Use scan_momentum_universe once for the broad symbol scan. This replaces raw per-symbol 4h get_candles calls for coarse screening.
+4. Use get_candidate_detail for at most 2 finalists. This replaces raw 1h get_candles calls for deep checks when it returns the needed facts.
+5. Use get_candles only as a fallback for missing screener/detail facts, never as the default broad scan.
+6. Use validate_order and calculate_position_size before any entry. calculate_position_size.amount is USDT notional; TradeDecision.amount is USDT notional; linear place_order.qty is base-asset quantity, so use qty = notional / current entry price. Do not pass USDT notional as linear qty and do not use marketUnit for linear orders.
+7. Then set_leverage and place_order only for a real long/short decision."""
 
 
 def _clear_step_artifacts(paths: _CodexStepPaths) -> None:

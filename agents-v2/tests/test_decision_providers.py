@@ -46,6 +46,38 @@ def replay_context() -> dict:
     }
 
 
+def deterministic_replay_context() -> dict:
+    context = replay_context()
+    context.update(
+        {
+            "screener_mode": "deterministic",
+            "maintenance_actions": [],
+            "scan_artifact_path": "worklog/screener/run-1/1704067200000.json",
+            "scan_hash": "sha256-test",
+            "candidate_primitives": [
+                {
+                    "symbol": "ETHUSDT",
+                    "side": "long",
+                    "signal_candidate_before_state": "long",
+                    "plan": {
+                        "pattern": "P2",
+                        "entry_price": 100.0,
+                        "stop_loss": 98.0,
+                        "take_profit": 104.0,
+                        "stop_distance_pct": 0.02,
+                        "tp_rr": 2.0,
+                    },
+                }
+            ],
+            "screener_candidates": ["ETHUSDT"],
+            "global_blocks": [],
+            "data_warnings": [],
+            "scan_markdown": "| symbol | candidate | pattern |\n| ETHUSDT | long | P2 |",
+        }
+    )
+    return context
+
+
 class DecisionProviderTests(unittest.TestCase):
     def test_hold_provider_preserves_legacy_partial_shape(self) -> None:
         output = HoldDecisionProvider().decide(replay_context())
@@ -68,6 +100,25 @@ class DecisionProviderTests(unittest.TestCase):
         self.assertIn("Never call exchange write tools on hold paths except mandatory position-maintenance close_position calls.", prompt)
         self.assertIn("Do not call settle_exchange", prompt)
         self.assertIn("place_order.qty is base-asset quantity", prompt)
+
+    def test_deterministic_exchange_replay_prompt_uses_runner_scan(self) -> None:
+        prompt = build_exchange_replay_prompt(deterministic_replay_context())
+
+        self.assertIn("Screener mode: deterministic.", prompt)
+        self.assertIn("sha256-test", prompt)
+        self.assertIn("| ETHUSDT | long | P2 |", prompt)
+        self.assertIn("Do not call scan_momentum_universe", prompt)
+        self.assertIn("use get_setup_digest", prompt)
+        self.assertIn("Never call close_position, cancel_order, or settle_exchange", prompt)
+        self.assertNotIn("coarse-scan symbols", prompt)
+        self.assertNotIn("Use raw get_candles only", prompt)
+
+    def test_openai_provider_passes_screener_mode_to_agent_builder(self) -> None:
+        with patch("traderbot_ai.decision.openai_agents_provider.build_trading_agent", return_value=object()) as build_agent:
+            OpenAIAgentsDecisionProvider(settings=settings(), session_name="session", max_turns=7, screener_mode="deterministic")
+
+        build_agent.assert_called_once()
+        self.assertEqual(build_agent.call_args.kwargs["screener_mode"], "deterministic")
 
     def test_openai_provider_preserves_step_session_and_run_log(self) -> None:
         provider = OpenAIAgentsDecisionProvider(settings=settings(), session_name="session", max_turns=7)
@@ -198,6 +249,50 @@ class DecisionProviderTests(unittest.TestCase):
         self.assertEqual(output["codex_usage"]["output_tokens"], 7)
         self.assertEqual(output["codex_usage"]["total_tokens"], 107)
         self.assertTrue(decision_path_exists)
+
+    def test_codex_provider_deterministic_prompt_and_mcp_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = CodexCliMcpDecisionProvider(
+                settings=settings(),
+                session_name="codex-session",
+                screener_mode="deterministic",
+                options=CodexCliOptions(output_dir=Path(tmp), codex_executable="codex-test", python_executable="python-test"),
+            )
+
+            def fake_run(command, input, text, capture_output, timeout, env, cwd):
+                self.assertIn("Use the scan table and candidate_primitives", input)
+                self.assertIn("Do not call scan_momentum_universe", input)
+                self.assertIn("deterministic MCP mode rejects broad/raw market-data bypasses", input)
+                self.assertNotIn("Use scan_momentum_universe once for the broad symbol scan", input)
+                self.assertEqual(env["TRADERBOT_SCREENER_MODE"], "deterministic")
+                command_text = "\n".join(command)
+                self.assertIn("mcp_servers.traderbot.env.TRADERBOT_SCREENER_MODE", command_text)
+                final_path = Path(command[command.index("--output-last-message") + 1])
+                final_path.write_text(
+                    json.dumps(
+                        {
+                            "final_decision": "hold",
+                            "symbol": "ETHUSDT",
+                            "timeframe": "4h",
+                            "thesis": "No valid setup.",
+                            "price": None,
+                            "stop_loss": None,
+                            "take_profit": None,
+                            "amount": 0.0,
+                            "confidence": 0.0,
+                            "risk_summary": "hold",
+                            "tool_summary": [],
+                            "worklog_path": None,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch("traderbot_ai.decision.codex_cli_provider.subprocess.run", side_effect=fake_run):
+                output = provider.decide(deterministic_replay_context())
+
+        self.assertEqual(output["final_decision"], "hold")
 
     def test_codex_provider_fail_open_hold_on_bad_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

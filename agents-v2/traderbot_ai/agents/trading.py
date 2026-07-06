@@ -49,19 +49,27 @@ def _maybe_codex_tool(settings: Settings):
         return []
 
 
-def build_tools(settings: Settings | None = None, *, backtest: bool = False, exchange_replay: bool = False):
+def build_tools(
+    settings: Settings | None = None,
+    *,
+    backtest: bool = False,
+    exchange_replay: bool = False,
+    screener_mode: str = "off",
+):
     settings = settings or load_settings()
     tools = []
-    market_tools = (
-        [simulator_tools.get_candles, simulator_tools.get_current_price]
-        if backtest or exchange_replay or settings.market_data_mode == "cache"
-        else [
+    deterministic_replay = exchange_replay and screener_mode == "deterministic"
+    if deterministic_replay:
+        market_tools = [simulator_tools.get_current_price]
+    elif backtest or exchange_replay or settings.market_data_mode == "cache":
+        market_tools = [simulator_tools.get_candles, simulator_tools.get_current_price]
+    else:
+        market_tools = [
             live_market.get_candles,
             live_market.get_current_price,
             live_market.get_order_book,
             live_market.save_market_artifact,
         ]
-    )
     simulator_namespace_tools = [
         simulator_tools.get_market_cache_status,
         simulator_tools.simulate_order_exit,
@@ -104,17 +112,28 @@ def build_tools(settings: Settings | None = None, *, backtest: bool = False, exc
         )
     )
     if exchange_replay:
+        replay_tools = (
+            [
+                function_tool(replay_helper_tools.get_setup_digest),
+                function_tool(replay_helper_tools.get_wallet_compact),
+                function_tool(replay_helper_tools.get_open_positions),
+                function_tool(replay_helper_tools.get_recent_trade_events),
+            ]
+            if deterministic_replay
+            else [
+                function_tool(replay_helper_tools.scan_momentum_universe),
+                function_tool(replay_helper_tools.get_setup_digest),
+                function_tool(replay_helper_tools.get_candidate_detail),
+                function_tool(replay_helper_tools.get_wallet_compact),
+                function_tool(replay_helper_tools.get_open_positions),
+                function_tool(replay_helper_tools.get_recent_trade_events),
+            ]
+        )
         tools.extend(
             tool_namespace(
                 name="replay",
                 description="Compact replay-only screener, candidate detail, wallet, and event helpers.",
-                tools=[
-                    function_tool(replay_helper_tools.scan_momentum_universe),
-                    function_tool(replay_helper_tools.get_candidate_detail),
-                    function_tool(replay_helper_tools.get_wallet_compact),
-                    function_tool(replay_helper_tools.get_open_positions),
-                    function_tool(replay_helper_tools.get_recent_trade_events),
-                ],
+                tools=replay_tools,
             )
         )
     if not backtest and not exchange_replay:
@@ -133,7 +152,7 @@ def build_tools(settings: Settings | None = None, *, backtest: bool = False, exc
             )
         )
     if not backtest:
-        exchange_tools = [get_wallet, set_leverage, place_order, cancel_order, settle_exchange, close_position]
+        exchange_tools = [get_wallet, set_leverage, place_order] if deterministic_replay else [get_wallet, set_leverage, place_order, cancel_order, settle_exchange, close_position]
         if not exchange_replay:
             exchange_tools.append(reset_exchange)
         tools.extend(
@@ -269,7 +288,81 @@ PRODUCTION DIFFERENCES, context only:
 """
 
 
-def build_trading_instructions(settings: Settings | None = None, *, backtest: bool = False, exchange_replay: bool = False) -> str:
+def _deterministic_exchange_replay_strategy_instructions() -> str:
+    return """
+Replay momentum strategy and job description:
+- MODE: EXCHANGE REPLAY WITH DETERMINISTIC RUNNER SCREENER. Everything in this section applies to replay.
+- Trade only disciplined 4h-24h swing-momentum setups on crypto USDT perpetuals.
+- The replay runner owns settlement, TP/SL settlement, max-hold checks, impulse-break maintenance, and the broad deterministic screener.
+- The runner calls you only when deterministic closed-candle screening produced at least one entry candidate.
+- Treat the provided scan table, scan hash, and candidate primitives as the canonical Step 3/4 screener result for this as_of.
+- Do not call scan_momentum_universe and do not fetch raw candles for broad screening.
+- Use get_setup_digest only for a listed candidate when you need more structural detail.
+- Use tools for all facts. Never invent prices, balances, candles, funding, order-book data, files, or chart paths.
+- Cached market tools are the only source of market truth. Exchange tools are the only source of wallet/order truth.
+- Pass the exact as_of from the user prompt to every exchange write tool that accepts as_of. set_leverage has no as_of argument.
+- Use the fee_rate from the user prompt when modeling costs.
+- Final output is always the structured TradeDecision, even after tool use.
+
+STEP PROCEDURE - execute in this exact order every deterministic replay call:
+
+Step 1. Accept runner settlement and maintenance:
+- Read the settlement JSON and runner-owned maintenance actions from the user prompt.
+- Do not call settle_exchange, close_position, or cancel_order. The runner already applied maintenance before this prompt.
+- Call get_wallet or get_wallet_compact only when you need to confirm current equity, open positions, or available balance.
+
+Step 2. Risk state reconstruction:
+- From wallet, settlement, maintenance actions, recent trade events, and visible prior order link ids, reconstruct trades opened this UTC day, realized PnL this UTC day and week, consecutive stop-outs, per-symbol 4h candidate cooldowns, and 24h post-stop cooldowns.
+- Hard limits: stop opening if daily realized loss <= -3% equity; halt if weekly realized loss <= -6%; pause new entries for 24h after 3 consecutive stop-outs.
+- Hard limits: max 3 new trades per UTC day, max 3 simultaneous positions, max 2 in one direction, max 1 per symbol.
+- New daily risk from positions opened today must stay <= 1.5% equity.
+- Prefer 1x leverage. Never exceed 2x leverage.
+- If a counter cannot be reconstructed, assume the conservative value and say so in risk_summary.
+
+Step 3. Deterministic candidate judgment:
+- Consider only candidates listed in candidate_primitives.
+- The screener already computed S1-S9, BTC regime, P1/P2/P3, anti-chase, cooldown/state blocks, and plan primitives on closed 1h bars.
+- A candidate can still be rejected for risk budget, poor structure, missing required data, stale/mixed thesis, invalid stop/TP geometry, or low expected edge after fees/slippage.
+- Use get_setup_digest for at most 2 listed candidates if the prompt table and candidate primitives do not contain enough structure.
+- Never request 1m candles for signal analysis.
+
+Step 4. Plan construction:
+- Use the runner-provided plan primitives as the default entry, stop, take-profit, pattern id, stop distance, and tp_rr.
+- Stop distance must be in [1.0%, 4.0%] after tick rounding. If the structural stop needs more than 4.0%, return hold; do not tighten the stop to fit.
+- Reward:risk must be >= 1.5 after rounding.
+- Geometry must be valid: long stop_loss < price < take_profit; short take_profit < price < stop_loss.
+- The TP distance must clear the fee_rate, expected funding if known, and likely slippage; otherwise hold.
+- Size so stop-loss risk <= 0.75% of equity, notional <= 20% of equity, and the 1.5% daily new-risk budget is respected.
+- Use calculate_position_size and validate_order before placing. calculate_position_size.amount and TradeDecision.amount are USDT notional. For simulator linear place_order, qty is base-asset quantity: qty = USDT notional / current entry price. Prefer 1x leverage.
+
+Step 5. Execution and write-tool discipline:
+- You may call set_leverage and place_order only when your final decision this step is long or short.
+- No exchange write calls on hold paths.
+- set_leverage is called at most once and only immediately before place_order.
+- For linear place_order, do not pass USDT notional as qty and do not use marketUnit; pass base-asset qty only.
+- In this replay, bid/ask limit entry with TTL is unavailable; entries are simulator market orders. State this in risk_summary every time you enter.
+- Do not claim TTL, TP1/TP2, breakeven, live mark-price stop behavior, funding checks, or order-book checks were enforced unless the tools actually provided them.
+
+Step 6. Output:
+- Always return the structured TradeDecision.
+- thesis stays short: setup, pattern, and the single biggest risk.
+- risk_summary must contain the actual numbers used, in this order when available: ROC_4h, ROC_24h, last-1h-share of ROC_4h, volume ratio, RSI(14,1h), ATR% of price, extension in ATR units vs EMA20(1h), pattern id, stop distance %, tp_rr, RR, estimated loss in USDT and % of equity, open positions count, trades opened today, cooldowns in effect, and data marked missing.
+- For non-entry holds, use N/A for entry-only fields that do not apply. Never invent stop, TP, RR, RSI, ATR, or pattern numbers just to fill the format.
+
+Worklog in replay mode:
+- Workspace tools are read-only here. You may read helpers or notes when a decision depends on prior work.
+- Do not attempt writes, do not refactor, and do not do unrelated code exploration during a replay step.
+- Notes are memory, not truth. They never override exchange state or cached market data.
+"""
+
+
+def build_trading_instructions(
+    settings: Settings | None = None,
+    *,
+    backtest: bool = False,
+    exchange_replay: bool = False,
+    screener_mode: str = "off",
+) -> str:
     settings = settings or load_settings()
     worklog_root = current_worklog_root()
     strategy_instructions = f"""
@@ -332,7 +425,7 @@ Execution discipline:
 - Final output must always be the structured TradeDecision.
 """
     if exchange_replay:
-        strategy_instructions = _exchange_replay_strategy_instructions()
+        strategy_instructions = _deterministic_exchange_replay_strategy_instructions() if screener_mode == "deterministic" else _exchange_replay_strategy_instructions()
     mode_instructions = (
         """
 Offline backtest mode:
@@ -387,7 +480,13 @@ If market data tools fail, return hold and explain the failure in risk_summary.
     return instructions
 
 
-def build_trading_agent(settings: Settings | None = None, *, backtest: bool = False, exchange_replay: bool = False) -> Agent:
+def build_trading_agent(
+    settings: Settings | None = None,
+    *,
+    backtest: bool = False,
+    exchange_replay: bool = False,
+    screener_mode: str = "off",
+) -> Agent:
     settings = settings or load_settings()
     model_settings = ModelSettings(
         reasoning=Reasoning(effort=settings.reasoning_effort),
@@ -399,9 +498,9 @@ def build_trading_agent(settings: Settings | None = None, *, backtest: bool = Fa
     )
     return Agent(
         name="Traderbot V2",
-        instructions=build_trading_instructions(settings, backtest=backtest, exchange_replay=exchange_replay),
+        instructions=build_trading_instructions(settings, backtest=backtest, exchange_replay=exchange_replay, screener_mode=screener_mode),
         model=settings.model,
         model_settings=model_settings,
-        tools=build_tools(settings, backtest=backtest, exchange_replay=exchange_replay),
+        tools=build_tools(settings, backtest=backtest, exchange_replay=exchange_replay, screener_mode=screener_mode),
         output_type=TradeDecision,
     )

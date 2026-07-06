@@ -8,6 +8,7 @@ from traderbot_ai.mcp import tools
 mcp = FastMCP("traderbot")
 
 mcp.tool()(tools.scan_momentum_universe)
+mcp.tool()(tools.get_setup_digest)
 mcp.tool()(tools.get_candidate_detail)
 mcp.tool()(tools.get_wallet_compact)
 mcp.tool()(tools.get_open_positions)

@@ -143,6 +143,14 @@ def place_order_impl(
     mark_interval: str = "1m",
 ) -> dict[str, Any]:
     try:
+        deterministic_error = _deterministic_place_order_error(
+            category=category,
+            symbol=symbol,
+            side=side,
+            reduce_only=reduceOnly,
+        )
+        if deterministic_error is not None:
+            return deterministic_error
         return _ok(
             **_exchange().place_order(
                 category=category,
@@ -167,6 +175,31 @@ def place_order_impl(
         )
     except Exception as error:
         return _error(str(error), category=category, symbol=symbol, side=side)
+
+
+def _deterministic_place_order_error(category: str, symbol: str, side: str, reduce_only: bool) -> dict[str, Any] | None:
+    if os.getenv("TRADERBOT_SCREENER_MODE") != "deterministic":
+        return None
+    if reduce_only:
+        return _error("runner-owned deterministic mode does not allow reduce-only provider orders", tool="place_order", screener_mode="deterministic")
+    if str(category).lower() != "linear":
+        return _error("runner-owned deterministic mode only allows linear finalist entries", tool="place_order", screener_mode="deterministic")
+    normalized_side = str(side).lower()
+    candidate_side = "long" if normalized_side in {"buy", "long"} else "short" if normalized_side in {"sell", "short"} else ""
+    if not candidate_side:
+        return _error(f"unsupported deterministic entry side: {side}", tool="place_order", screener_mode="deterministic")
+
+    from traderbot_ai.tools import replay_helpers
+
+    allow_error = replay_helpers._deterministic_candidate_error(symbol, candidate_side)
+    if allow_error is None:
+        return None
+    return _error(
+        "place_order is only available for runner-provided deterministic candidates",
+        tool="place_order",
+        screener_mode="deterministic",
+        candidate_error=allow_error,
+    )
 
 
 def cancel_order_impl(
