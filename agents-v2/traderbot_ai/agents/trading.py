@@ -10,6 +10,7 @@ from traderbot_ai.schemas import TradeDecision
 from traderbot_ai.tools.charts import list_stored_charts, load_chart_metadata, store_chart
 from traderbot_ai.tools import market as live_market
 from traderbot_ai.tools import simulator as simulator_tools
+from traderbot_ai.tools import replay_helpers as replay_helper_tools
 from traderbot_ai.tools.exchange import cancel_order, close_position, get_wallet, place_order, reset_exchange, set_leverage, settle_exchange
 from traderbot_ai.tools.portfolio import get_current_balance, paper_place_order, reset_paper_portfolio
 from traderbot_ai.tools.risk import calculate_position_size, validate_order
@@ -102,6 +103,20 @@ def build_tools(settings: Settings | None = None, *, backtest: bool = False, exc
             tools=simulator_namespace_tools,
         )
     )
+    if exchange_replay:
+        tools.extend(
+            tool_namespace(
+                name="replay",
+                description="Compact replay-only screener, candidate detail, wallet, and event helpers.",
+                tools=[
+                    function_tool(replay_helper_tools.scan_momentum_universe),
+                    function_tool(replay_helper_tools.get_candidate_detail),
+                    function_tool(replay_helper_tools.get_wallet_compact),
+                    function_tool(replay_helper_tools.get_open_positions),
+                    function_tool(replay_helper_tools.get_recent_trade_events),
+                ],
+            )
+        )
     if not backtest and not exchange_replay:
         tools.extend(
             tool_namespace(
@@ -165,7 +180,7 @@ STEP PROCEDURE - execute in this exact order every replay step:
 
 Step 1. Settlement and position maintenance:
 - Read the settlement JSON from the user prompt.
-- Call get_wallet before scanning.
+- Call get_wallet or an available compact wallet equivalent before scanning.
 - For every open position, compute hold time from its entry time or order link id timestamp.
 - If hold time >= max_hold_hours (24h unless the position plan said less), close it now with close_position. This is mandatory and comes before scanning.
 - Impulse-break exit: using cached 1h candles for that symbol, close only if both are true: the last closed 1h candle closed across EMA20(1h) against the position, and ROC_4h reversed against the position by more than 1.0%.
@@ -180,8 +195,9 @@ Step 2. Risk state reconstruction:
 - If a counter cannot be reconstructed, assume the conservative value and say so in risk_summary.
 
 Step 3. Coarse scan:
-- For each replay symbol, request 4h candles with limit 60. Use one call per symbol and do not repeat calls unless a tool failed.
-- Also fetch BTC 4h candles once for the regime gate if BTC was not already fetched as a symbol.
+- If scan_momentum_universe is available, call it once with all replay symbols, the exact as_of, and the decision interval. Treat its rows as the Step 3 closed-candle coarse scan, then do not call get_candles for broad per-symbol 4h screening unless the screener failed or omitted a required fact.
+- Only if the compact screener is unavailable, failed, or omitted a required fact, request 4h candles with limit 60 for the affected replay symbols. Use one call per symbol and do not repeat calls unless a tool failed.
+- Also fetch BTC 4h candles once for the regime gate only if BTC regime was not available from the screener output and BTC was not already fetched as a symbol.
 - Compute ROC_4h and ROC_24h from closed candles.
 - Compute coarse_4h_volume_ratio as last closed 4h volume divided by median 4h volume over the previous 20 closed 4h bars. Use it only for ranking survivors, not as the final S3 volume gate.
 - Discard every symbol failing S1/S2 immediately: long requires ROC_4h >= +2.5% and ROC_24h >= +2.0%; short requires ROC_4h <= -2.5% and ROC_24h <= -2.0%.
@@ -190,7 +206,8 @@ Step 3. Coarse scan:
 
 Step 4. Shortlist deep check:
 - Rank survivors by abs(ROC_4h) times coarse_4h_volume_ratio. Take at most 2 finalists.
-- For finalists only, request 1h candles with limit 170.
+- If get_candidate_detail is available, call it for each finalist and use its closed-candle 1h facts for the gates below. Do not call get_candles for finalist 1h data unless candidate detail failed or omitted a required fact.
+- Only if candidate detail is unavailable, failed, or omitted a required fact, request 1h candles with limit 170 for finalists only.
 - Verify all gates on closed candles:
   - S3 volume: last closed 1h volume / median 1h volume over the previous 24 bars >= 2.0.
   - S4 RSI(14, 1h): long in [55, 78]; short in [22, 45].
@@ -220,7 +237,7 @@ Step 5. Plan construction:
 - Geometry must be valid: long stop_loss < price < take_profit; short take_profit < price < stop_loss.
 - The TP distance must clear the fee_rate, expected funding if known, and likely slippage; otherwise hold.
 - Size so stop-loss risk <= 0.75% of equity, notional <= 20% of equity, and the 1.5% daily new-risk budget is respected.
-- Use calculate_position_size and validate_order before placing. Prefer 1x leverage.
+- Use calculate_position_size and validate_order before placing. calculate_position_size.amount and TradeDecision.amount are USDT notional. For simulator linear place_order, qty is base-asset quantity: qty = USDT notional / current entry price. Prefer 1x leverage.
 
 Step 6. Execution and write-tool discipline:
 - The runner already applied settlement before this prompt. Do not call settle_exchange during a replay step.
@@ -228,6 +245,7 @@ Step 6. Execution and write-tool discipline:
 - You may call set_leverage and place_order only when your final decision this step is long or short.
 - No exchange write calls on hold paths except mandatory Step 1 maintenance closes. Do not use hypothetical set_leverage or cancel_order.
 - set_leverage is called at most once and only immediately before place_order.
+- For linear place_order, do not pass USDT notional as qty and do not use marketUnit; pass base-asset qty only.
 - In this replay, bid/ask limit entry with TTL is unavailable; entries are simulator market orders. State this in risk_summary every time you enter.
 - Do not claim TTL, TP1/TP2, breakeven, live mark-price stop behavior, funding checks, or order-book checks were enforced unless the tools actually provided them.
 
@@ -251,17 +269,9 @@ PRODUCTION DIFFERENCES, context only:
 """
 
 
-def build_trading_agent(settings: Settings | None = None, *, backtest: bool = False, exchange_replay: bool = False) -> Agent:
+def build_trading_instructions(settings: Settings | None = None, *, backtest: bool = False, exchange_replay: bool = False) -> str:
     settings = settings or load_settings()
     worklog_root = current_worklog_root()
-    model_settings = ModelSettings(
-        reasoning=Reasoning(effort=settings.reasoning_effort),
-        verbosity="low",
-        parallel_tool_calls=True,
-        prompt_cache_retention="24h",
-        include_usage=True,
-        max_tokens=settings.max_tokens,
-    )
     strategy_instructions = f"""
 Momentum strategy and job description:
 - Trade only disciplined 4h-24h swing-momentum setups on crypto USDT perpetuals.
@@ -374,9 +384,22 @@ Operating rules:
 
 If market data tools fail, return hold and explain the failure in risk_summary.
 """
+    return instructions
+
+
+def build_trading_agent(settings: Settings | None = None, *, backtest: bool = False, exchange_replay: bool = False) -> Agent:
+    settings = settings or load_settings()
+    model_settings = ModelSettings(
+        reasoning=Reasoning(effort=settings.reasoning_effort),
+        verbosity="low",
+        parallel_tool_calls=True,
+        prompt_cache_retention="24h",
+        include_usage=True,
+        max_tokens=settings.max_tokens,
+    )
     return Agent(
         name="Traderbot V2",
-        instructions=instructions,
+        instructions=build_trading_instructions(settings, backtest=backtest, exchange_replay=exchange_replay),
         model=settings.model,
         model_settings=model_settings,
         tools=build_tools(settings, backtest=backtest, exchange_replay=exchange_replay),

@@ -271,7 +271,7 @@ def place_order(
     as_of: str | None = None,
     mark_interval: str = "1m",
 ) -> dict:
-    """Place a spot or linear simulator order with Bybit-like parameters. as_of is required; spot Market Buy defaults to quoteCoin qty."""
+    """Place a spot or linear simulator order. as_of is required. Linear qty is base-asset quantity, not USDT notional; spot Market Buy defaults to quoteCoin qty."""
     return _agent_tool_response(
         place_order_impl(
             category=category,

@@ -164,6 +164,7 @@ def run_exchange_replay(
                 exchange_event_cursor = _file_size(exchange.events_path)
                 decision = _jsonable(decide(context))
                 agent_exchange_events = _read_jsonl_since(exchange.events_path, exchange_event_cursor)
+                _validate_decision_exchange_consistency(decision, agent_exchange_events)
                 wallet_after = exchange.wallet_summary(symbols=list(config.symbols), as_of=as_of_ms, mark_interval=config.execution_interval)
                 step = {
                     "as_of_ms": as_of_ms,
@@ -262,6 +263,80 @@ def _required_path(path: Path | None) -> Path:
     if path is None:
         raise ValueError("replay path is required")
     return Path(path)
+
+
+def _validate_decision_exchange_consistency(decision: Any, agent_exchange_events: list[dict[str, Any]]) -> None:
+    if not isinstance(decision, dict):
+        return
+    final_decision = str(decision.get("final_decision", "")).lower()
+    event_types = [str(event.get("type", "")) for event in agent_exchange_events]
+    place_order_events = [event for event in agent_exchange_events if str(event.get("type", "")) == "place_order"]
+    if final_decision in {"long", "short"}:
+        if len(place_order_events) != 1:
+            raise RuntimeError(f"{final_decision} decision did not produce a place_order exchange event")
+        if not _place_order_event_matches_decision(place_order_events[0], decision, final_decision):
+            raise RuntimeError(f"{final_decision} decision does not match the place_order exchange event")
+    if final_decision == "hold":
+        disallowed = [event_type for event_type in event_types if event_type != "position_closed"]
+        if disallowed:
+            raise RuntimeError(f"hold decision produced disallowed exchange events: {', '.join(disallowed)}")
+
+
+def _place_order_event_matches_decision(event: dict[str, Any], decision: dict[str, Any], final_decision: str) -> bool:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    if str(payload.get("category", "")).lower() != "linear":
+        return False
+    if str(payload.get("orderType", "")).lower() != "market":
+        return False
+    if str(payload.get("status", "")).lower() != "filled":
+        return False
+    if not _symbols_match(payload.get("symbol"), decision.get("symbol")):
+        return False
+    expected_side = "Buy" if final_decision == "long" else "Sell"
+    if str(payload.get("side")) != expected_side:
+        return False
+    amount = _optional_float(decision.get("amount"))
+    if amount is None or amount <= 0:
+        return False
+    position = payload.get("position") if isinstance(payload.get("position"), dict) else {}
+    if not position:
+        return False
+    if str(position.get("category", "")).lower() != "linear":
+        return False
+    notional = _optional_float(payload.get("notional_usdt"))
+    if notional is None:
+        notional = _optional_float(position.get("notional_usdt"))
+    if notional is None:
+        qty = _optional_float(payload.get("qty"))
+        price = _optional_float(payload.get("price"))
+        if qty is not None and price is not None:
+            notional = qty * price
+    if notional is None or not math.isclose(notional, amount, rel_tol=0.02, abs_tol=1e-6):
+        return False
+    for decision_key, payload_key in (("stop_loss", "stopLoss"), ("take_profit", "takeProfit")):
+        decision_value = _optional_float(decision.get(decision_key))
+        payload_value = _optional_float(payload.get(payload_key))
+        if decision_value is None or payload_value is None:
+            return False
+        if not math.isclose(payload_value, decision_value, rel_tol=1e-6, abs_tol=1e-8):
+            return False
+    return True
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _symbols_match(left: Any, right: Any) -> bool:
+    try:
+        return normalize_symbol(str(left or "")) == normalize_symbol(str(right or ""))
+    except ValueError:
+        return False
 
 
 def _split_symbols(symbols: str | list[str] | tuple[str, ...]) -> list[str]:

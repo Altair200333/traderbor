@@ -3,15 +3,18 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 import uuid
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from agents import Runner
-from pydantic import BaseModel
 
 from traderbot_ai.agents.trading import build_tools, build_trading_agent
 from traderbot_ai.config import load_settings
+from traderbot_ai.decision import CodexCliMcpDecisionProvider, CodexCliOptions, HoldDecisionProvider, OpenAIAgentsDecisionProvider
+from traderbot_ai.decision.serialization import jsonable
 from traderbot_ai.providers import provider_status
 from traderbot_ai.runtime.run_store import write_run_record
 from traderbot_ai.runtime.run_context import agent_run_context, current_worklog_root
@@ -25,6 +28,7 @@ from traderbot_ai.tools.simulator import (
     preload_market_cache_impl,
     simulate_order_exit_impl,
 )
+from traderbot_ai.tools.market import parse_time_ms
 from traderbot_ai.tools.workspace import append_worklog_record
 
 
@@ -34,17 +38,7 @@ def _dump(value: Any) -> None:
 
 
 def _jsonable(value: Any) -> Any:
-    if isinstance(value, BaseModel):
-        value = value.model_dump(mode="json")
-    elif hasattr(value, "model_dump"):
-        value = value.model_dump(mode="json")
-    elif isinstance(value, list):
-        return [_jsonable(item) for item in value]
-    elif isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    elif not isinstance(value, (str, int, float, bool, type(None))):
-        return str(value)
-    return value
+    return jsonable(value)
 
 
 def _close_session(session: Any) -> None:
@@ -169,10 +163,15 @@ Return a structured TradeDecision.
 
 def cmd_exchange_replay(args: argparse.Namespace) -> None:
     if not args.no_preload or args.preload:
+        preload_start_time: str | int | float | None = args.start_time
+        if args.cache_lookback_hours and args.cache_lookback_hours > 0:
+            start_ms = parse_time_ms(args.start_time)
+            if start_ms is not None:
+                preload_start_time = start_ms - int(args.cache_lookback_hours * 60 * 60_000)
         preload = preload_market_cache_impl(
             symbols=args.symbols,
             intervals=args.cache_intervals,
-            start_time=args.start_time,
+            start_time=preload_start_time,
             end_time=args.end_time,
             max_candles_per_pair=args.max_candles_per_pair,
             include_agg_trades=args.agg_trades,
@@ -201,72 +200,48 @@ def cmd_exchange_replay(args: argparse.Namespace) -> None:
         events_path=args.events_path,
         replay_path=args.replay_path,
     )
-    if args.decision_mode == "hold":
-        def decide(context: dict[str, Any]) -> dict[str, Any]:
-            return {
-                "final_decision": "hold",
-                "symbol": context["symbols"][0],
-                "amount": 0.0,
-                "risk_summary": "deterministic hold decision mode",
-            }
-    else:
+    provider_name = args.decision_provider or ("hold" if args.decision_mode == "hold" else "openai-agents")
+    if args.decision_mode == "hold" and provider_name != "hold":
+        _dump({"ok": False, "error": "--decision-mode hold conflicts with --decision-provider"})
+        return
+    if provider_name == "hold":
+        provider = HoldDecisionProvider()
+    elif provider_name == "openai-agents":
         settings = replace(load_settings(), market_data_mode="cache", enable_codex_tool=False)
-        agent = build_trading_agent(settings, exchange_replay=True)
         session_name = args.session or f"{config.run_id}-agent"
+        provider = OpenAIAgentsDecisionProvider(settings=settings, session_name=session_name, max_turns=args.max_turns)
+    elif provider_name == "codex-cli-mcp":
+        if args.codex_use_existing_mcp_config and not args.codex_use_user_config:
+            _dump({"ok": False, "error": "--codex-use-existing-mcp-config requires --codex-use-user-config"})
+            return
+        settings = replace(load_settings(), market_data_mode="cache", enable_codex_tool=False)
+        session_name = args.session or f"{config.run_id}-codex"
+        provider = CodexCliMcpDecisionProvider(
+            settings=settings,
+            session_name=session_name,
+            options=CodexCliOptions(
+                model=args.codex_model,
+                reasoning_effort=args.codex_reasoning_effort,
+                profile=args.codex_profile,
+                sandbox=args.codex_sandbox,
+                timeout_sec=args.codex_timeout_sec,
+                output_dir=args.codex_output_dir,
+                fail_open=args.codex_fail_open,
+                codex_executable=args.codex_executable,
+                python_executable=args.codex_mcp_python,
+                ignore_user_config=not args.codex_use_user_config,
+                full_auto=not args.codex_no_full_auto,
+                include_mcp_config=not args.codex_use_existing_mcp_config,
+            ),
+        )
+    else:
+        _dump({"ok": False, "error": f"unsupported decision provider: {provider_name}"})
+        return
 
-        def decide(context: dict[str, Any]) -> dict[str, Any]:
-            step_session = get_session(
-                f"{session_name}-{context['as_of_ms']}",
-                settings=settings,
-                enable_compaction=False,
-            )
-            prompt = f"""
-Exchange replay step.
-
-Run id: {context["run_id"]}
-Symbols: {", ".join(context["symbols"])}
-As-of: {context["as_of_iso"]} ({context["as_of_ms"]})
-Next step: {context["next_as_of_ms"]}
-Decision interval: {context["decision_interval"]}
-Execution interval: {context["execution_interval"]}
-Fee rate: {context["fee_rate"]}
-Agent cadence in this runner: every {context["decision_interval"]}. Production target is candidate-driven; no valid candidate means hold.
-Strategy horizon: 4h to 24h swing momentum.
-Worklog memory root: {current_worklog_root()}.
-
-Wallet:
-{json.dumps(_jsonable(context["wallet"]), ensure_ascii=False)}
-
-Settlement just applied:
-{json.dumps(_jsonable(context["settlement"]), ensure_ascii=False)}
-
-Use cached market data with this exact as_of.
-Use exchange tools for wallet/order actions.
-Follow the replay step procedure from the system prompt:
-1. maintain existing positions first,
-2. reconstruct risk state,
-3. coarse-scan symbols with 4h candles only,
-4. deep-check at most 2 finalists with 1h candles,
-5. build and validate a plan only for a surviving candidate.
-Trade only valid momentum setups; otherwise return hold.
-Never request 1m candles for signal analysis.
-Never call exchange write tools on hold paths except mandatory position-maintenance close_position calls.
-Do not call settle_exchange; settlement was already applied by the runner.
-Read recent relevant worklogs/helpers only if needed before deciding.
-Do not do unrelated code exploration during this replay step.
-Return a structured TradeDecision.
-"""
-            try:
-                result = Runner.run_sync(agent, prompt, session=step_session, max_turns=args.max_turns)
-            finally:
-                _close_session(step_session)
-            run_log = write_run_record(session_name, prompt, result)
-            output = _jsonable(result.final_output)
-            if isinstance(output, dict):
-                return {**output, "agent_run_log": run_log}
-            return {"final_output": output, "agent_run_log": run_log}
-
-    _dump(run_exchange_replay(config=config, decide=decide))
+    try:
+        _dump(run_exchange_replay(config=config, decide=provider.decide))
+    finally:
+        provider.close()
 
 
 def cmd_replay_report(args: argparse.Namespace) -> None:
@@ -393,6 +368,7 @@ def build_parser() -> argparse.ArgumentParser:
     exchange_replay.add_argument("--decision-interval", default="4h")
     exchange_replay.add_argument("--execution-interval", default="1m")
     exchange_replay.add_argument("--cache-intervals", default="1m,1h,4h")
+    exchange_replay.add_argument("--cache-lookback-hours", type=float, default=240.0, help="Extra market-cache history to preload before start-time for agent indicators.")
     exchange_replay.add_argument("--balance-usdt", type=float, default=1000.0)
     exchange_replay.add_argument("--balances-json", help='Optional wallet balances, e.g. {"USDT": 1000, "BTC": 0.01}.')
     exchange_replay.add_argument("--fee-rate", type=float, default=0.0)
@@ -403,7 +379,20 @@ def build_parser() -> argparse.ArgumentParser:
     exchange_replay.add_argument("--replay-path")
     exchange_replay.add_argument("--session")
     exchange_replay.add_argument("--max-turns", type=int, default=12)
-    exchange_replay.add_argument("--decision-mode", choices=["agent", "hold"], default="agent", help="Use the real agent or a deterministic hold decision for local smoke replays.")
+    exchange_replay.add_argument("--decision-mode", choices=["agent", "hold"], default="agent", help="Compatibility alias. Use --decision-provider for new runs.")
+    exchange_replay.add_argument("--decision-provider", choices=["openai-agents", "codex-cli-mcp", "hold"], help="Decision provider for replay.")
+    exchange_replay.add_argument("--codex-model", help="Model for --decision-provider codex-cli-mcp. If omitted, Codex CLI chooses its configured/default model.")
+    exchange_replay.add_argument("--codex-reasoning-effort", choices=["low", "medium", "high", "xhigh"], help="Codex model_reasoning_effort config override.")
+    exchange_replay.add_argument("--codex-profile", help="Codex config profile for --decision-provider codex-cli-mcp.")
+    exchange_replay.add_argument("--codex-sandbox", default="read-only", choices=["read-only", "workspace-write", "danger-full-access"])
+    exchange_replay.add_argument("--codex-timeout-sec", type=int, default=1800)
+    exchange_replay.add_argument("--codex-output-dir", type=Path, default=None)
+    exchange_replay.add_argument("--codex-fail-open", choices=["error", "hold"], default="error")
+    exchange_replay.add_argument("--codex-executable", default="codex")
+    exchange_replay.add_argument("--codex-mcp-python", default=sys.executable)
+    exchange_replay.add_argument("--codex-no-full-auto", action="store_true", help="Disable Codex --full-auto. Not recommended for noninteractive MCP replay.")
+    exchange_replay.add_argument("--codex-use-user-config", action="store_true", help="Load ~/.codex/config.toml instead of --ignore-user-config.")
+    exchange_replay.add_argument("--codex-use-existing-mcp-config", action="store_true", help="Do not inject the local traderbot MCP server config.")
     exchange_replay.add_argument("--preload", action="store_true", help="Preload cache before running. This is the default unless --no-preload is set.")
     exchange_replay.add_argument("--no-preload", action="store_true", help="Use existing local cache without fetching first.")
     exchange_replay.add_argument("--max-candles-per-pair", type=int)

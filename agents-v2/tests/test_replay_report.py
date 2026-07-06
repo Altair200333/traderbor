@@ -66,8 +66,16 @@ class ReplayReportTests(unittest.TestCase):
                 calls.append(context["as_of_ms"])
                 if len(calls) == 1:
                     exchange.set_leverage("linear", BTC, "5", "5")
-                    exchange.place_order("linear", BTC, "Buy", "Market", qty=1.0, takeProfit=110.0, stopLoss=95.0, as_of=context["as_of_ms"])
-                    return {"final_decision": "long", "symbol": BTC, "thesis": "test long", "risk_summary": "ok"}
+                    exchange.place_order("linear", BTC, "Buy", "Market", qty=1.0, takeProfit=110.0, stopLoss=96.0, as_of=context["as_of_ms"])
+                    return {
+                        "final_decision": "long",
+                        "symbol": BTC,
+                        "amount": 100.0,
+                        "take_profit": 110.0,
+                        "stop_loss": 96.0,
+                        "thesis": "test long",
+                        "risk_summary": "ok",
+                    }
                 return {"final_decision": "hold", "symbol": BTC, "thesis": "wait", "risk_summary": "done"}
 
             run_exchange_replay(config=config, decide=decide, cache=cache, exchange=exchange)

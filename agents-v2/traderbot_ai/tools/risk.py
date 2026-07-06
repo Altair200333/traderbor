@@ -184,7 +184,7 @@ def calculate_position_size(
     liquidity_cap: float | None = None,
     max_position_fraction: float = 1.0,
 ) -> dict:
-    """Calculate a USDT position size from stop risk, daily risk share, and optional notional/liquidity caps."""
+    """Calculate a USDT notional position size. Convert amount / entry_price to base qty before linear place_order."""
     return _calculate_position_size_impl(
         balance_usdt=balance_usdt,
         price=price,

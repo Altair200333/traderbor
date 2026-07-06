@@ -12,7 +12,7 @@ from typing import Any, Literal
 from traderbot_ai.exchange.interface import CancelOrderError
 from traderbot_ai.paths import DATA_DIR, ensure_runtime_dirs
 from traderbot_ai.simulator.execution import ExecutionEngine, Order
-from traderbot_ai.simulator.market_cache import Candle, LocalMarketCache
+from traderbot_ai.simulator.market_cache import Candle, LocalMarketCache, candle_freshness
 from traderbot_ai.tools.market import INTERVAL_MS, normalize_symbol, parse_time_ms
 
 
@@ -864,9 +864,7 @@ class SimulatedExchange:
         candle = self.cache.latest_candle(symbol=symbol, interval=interval, as_of_ms=as_of_ms)
         if candle is None:
             return candle
-        reference_ms = int(as_of_ms) if as_of_ms is not None else _now_ms()
-        interval_ms = INTERVAL_MS.get(interval)
-        if interval_ms is not None and reference_ms - int(candle.close_time) >= interval_ms:
+        if not candle_freshness(candle, interval, as_of_ms)["fresh"]:
             return None
         return candle
 

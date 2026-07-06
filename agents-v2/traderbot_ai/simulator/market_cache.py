@@ -695,6 +695,31 @@ class LocalMarketCache:
         }
 
 
+def candle_freshness(candle: Candle | None, interval: str, as_of_ms: int | None = None) -> dict[str, Any]:
+    if interval not in INTERVAL_MS:
+        raise ValueError(f"unsupported interval: {interval}")
+    interval_ms = INTERVAL_MS[interval]
+    reference_ms = int(as_of_ms) if as_of_ms is not None else int(datetime.now(timezone.utc).timestamp() * 1000)
+    if candle is None:
+        return {
+            "fresh": False,
+            "has_data": False,
+            "reference_ms": reference_ms,
+            "interval_ms": interval_ms,
+            "last_close_time_ms": None,
+            "age_ms": None,
+        }
+    age_ms = reference_ms - int(candle.close_time)
+    return {
+        "fresh": age_ms < interval_ms,
+        "has_data": True,
+        "reference_ms": reference_ms,
+        "interval_ms": interval_ms,
+        "last_close_time_ms": int(candle.close_time),
+        "age_ms": age_ms,
+    }
+
+
 def _optional_float(value: Any) -> float | None:
     return None if value is None else float(value)
 

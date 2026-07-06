@@ -61,6 +61,11 @@ class ExchangeReplayTests(unittest.TestCase):
 
         self.assertIn("get_candles", names)
         self.assertIn("get_current_price", names)
+        self.assertIn("scan_momentum_universe", names)
+        self.assertIn("get_candidate_detail", names)
+        self.assertIn("get_wallet_compact", names)
+        self.assertIn("get_open_positions", names)
+        self.assertIn("get_recent_trade_events", names)
         self.assertIn("get_wallet", names)
         self.assertIn("place_order", names)
         self.assertIn("cancel_order", names)
@@ -353,11 +358,11 @@ class ExchangeReplayTests(unittest.TestCase):
                         "Market",
                         qty=1.0,
                         takeProfit=110.0,
-                        stopLoss=95.0,
+                        stopLoss=96.0,
                         fee_rate=context["fee_rate"],
                         as_of=context["as_of_ms"],
                     )
-                    return {"final_decision": "long", "symbol": BTC, "amount": 100.0}
+                    return {"final_decision": "long", "symbol": BTC, "amount": 100.0, "stop_loss": 96.0, "take_profit": 110.0}
                 return {"final_decision": "hold", "symbol": BTC, "amount": 0.0}
 
             result = run_exchange_replay(config=config, decide=decide, cache=cache, exchange=exchange)
@@ -506,6 +511,156 @@ class ExchangeReplayTests(unittest.TestCase):
 
             replay_events = [json.loads(line)["type"] for line in replay_path.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(replay_events[-1], "replay_failed")
+
+    def test_run_exchange_replay_rejects_trade_decision_without_place_order_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            replay_path = Path(tmp) / "replay.jsonl"
+            config = build_exchange_replay_config(
+                symbols=[BTC],
+                start_time=BASE_MS,
+                end_time=BASE_MS + FOUR_HOURS_MS,
+                state_path=Path(tmp) / "exchange.json",
+                events_path=Path(tmp) / "exchange-events.jsonl",
+                replay_path=replay_path,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "did not produce a place_order"):
+                run_exchange_replay(config=config, decide=lambda context: {"final_decision": "long", "symbol": BTC, "amount": 100.0})
+
+            replay_events = [json.loads(line)["type"] for line in replay_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(replay_events[-1], "replay_failed")
+
+    def test_run_exchange_replay_rejects_hold_with_non_maintenance_write_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            replay_path = Path(tmp) / "replay.jsonl"
+            config = build_exchange_replay_config(
+                symbols=[BTC],
+                start_time=BASE_MS,
+                end_time=BASE_MS + FOUR_HOURS_MS,
+                state_path=Path(tmp) / "exchange.json",
+                events_path=Path(tmp) / "exchange-events.jsonl",
+                replay_path=replay_path,
+            )
+
+            def decide(_: dict) -> dict:
+                set_leverage_impl("linear", BTC, "1", "1")
+                return {"final_decision": "hold", "symbol": BTC, "amount": 0.0}
+
+            with self.assertRaisesRegex(RuntimeError, "hold decision produced disallowed exchange events"):
+                run_exchange_replay(config=config, decide=decide)
+
+            replay_events = [json.loads(line)["type"] for line in replay_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(replay_events[-1], "replay_failed")
+
+    def test_run_exchange_replay_rejects_decision_that_mismatches_place_order_payload(self) -> None:
+        cases = [
+            ("wrong_symbol", {"final_decision": "long", "symbol": ETH, "amount": 100.0}),
+            ("wrong_side", {"final_decision": "short", "symbol": BTC, "amount": 100.0}),
+            ("wrong_amount", {"final_decision": "long", "symbol": BTC, "amount": 250.0}),
+            ("wrong_take_profit", {"final_decision": "long", "symbol": BTC, "amount": 100.0, "take_profit": 111.0}),
+        ]
+        for name, decision in cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    cache = LocalMarketCache(Path(tmp) / "market.sqlite3")
+                    cache.upsert_candles(
+                        [
+                            candle_at_close(BTC, BASE_MS, 100.0, 101.0, 99.0, 100.0),
+                            candle_at_close(ETH, BASE_MS, 10.0, 11.0, 9.0, 10.0),
+                        ]
+                    )
+                    state_path = Path(tmp) / "exchange.json"
+                    events_path = Path(tmp) / "exchange-events.jsonl"
+                    replay_path = Path(tmp) / "replay.jsonl"
+                    config = build_exchange_replay_config(
+                        symbols=[BTC, ETH],
+                        start_time=BASE_MS,
+                        end_time=BASE_MS + FOUR_HOURS_MS,
+                        state_path=state_path,
+                        events_path=events_path,
+                        replay_path=replay_path,
+                    )
+                    exchange = SimulatedExchange(state_path, events_path, cache=cache)
+
+                    def decide(context: dict) -> dict:
+                        exchange.set_leverage("linear", BTC, "1", "1")
+                        exchange.place_order(
+                            "linear",
+                            BTC,
+                            "Buy",
+                            "Market",
+                            qty=1.0,
+                            takeProfit=110.0,
+                            stopLoss=96.0,
+                            fee_rate=context["fee_rate"],
+                            as_of=context["as_of_ms"],
+                        )
+                        return decision
+
+                    with self.assertRaisesRegex(RuntimeError, "does not match the place_order"):
+                        run_exchange_replay(config=config, decide=decide, cache=cache, exchange=exchange)
+
+                    replay_events = [json.loads(line)["type"] for line in replay_path.read_text(encoding="utf-8").splitlines()]
+                    self.assertEqual(replay_events[-1], "replay_failed")
+
+    def test_run_exchange_replay_rejects_spot_order_for_trade_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = LocalMarketCache(Path(tmp) / "market.sqlite3")
+            cache.upsert_candles([candle_at_close(BTC, BASE_MS, 100.0, 101.0, 99.0, 100.0)])
+            state_path = Path(tmp) / "exchange.json"
+            events_path = Path(tmp) / "exchange-events.jsonl"
+            replay_path = Path(tmp) / "replay.jsonl"
+            config = build_exchange_replay_config(
+                symbols=[BTC],
+                start_time=BASE_MS,
+                end_time=BASE_MS + FOUR_HOURS_MS,
+                state_path=state_path,
+                events_path=events_path,
+                replay_path=replay_path,
+            )
+            exchange = SimulatedExchange(state_path, events_path, cache=cache)
+
+            def decide(context: dict) -> dict:
+                exchange.place_order("spot", BTC, "Buy", "Market", qty=100.0, marketUnit="quoteCoin", as_of=context["as_of_ms"])
+                return {
+                    "final_decision": "long",
+                    "symbol": BTC,
+                    "amount": 100.0,
+                    "stop_loss": 96.0,
+                    "take_profit": 110.0,
+                }
+
+            with self.assertRaisesRegex(RuntimeError, "does not match the place_order"):
+                run_exchange_replay(config=config, decide=decide, cache=cache, exchange=exchange)
+
+            replay_events = [json.loads(line)["type"] for line in replay_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(replay_events[-1], "replay_failed")
+
+    def test_run_exchange_replay_allows_failed_mcp_write_attempt_without_side_effect(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            audit_path = Path(tmp) / "audit.jsonl"
+            audit_path.write_text(
+                json.dumps({"tool": "place_order", "result": {"ok": False, "error": "risk validation failed"}}) + "\n",
+                encoding="utf-8",
+            )
+            replay_path = Path(tmp) / "replay.jsonl"
+            config = build_exchange_replay_config(
+                symbols=[BTC],
+                start_time=BASE_MS,
+                end_time=BASE_MS + FOUR_HOURS_MS,
+                state_path=Path(tmp) / "exchange.json",
+                events_path=Path(tmp) / "exchange-events.jsonl",
+                replay_path=replay_path,
+            )
+
+            def decide(_: dict) -> dict:
+                return {"final_decision": "hold", "symbol": BTC, "amount": 0.0, "codex_mcp_audit_path": str(audit_path)}
+
+            result = run_exchange_replay(config=config, decide=decide)
+
+            replay_events = [json.loads(line)["type"] for line in replay_path.read_text(encoding="utf-8").splitlines()]
+            self.assertTrue(result["ok"])
+            self.assertEqual(replay_events[-1], "replay_completed")
 
 
 if __name__ == "__main__":

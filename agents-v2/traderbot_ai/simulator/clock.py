@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 from contextvars import ContextVar
+from pathlib import Path
 
 from traderbot_ai.paths import DATA_DIR, ensure_runtime_dirs
 from traderbot_ai.tools.market import parse_time_ms
 
 
 SIMULATION_CLOCK_PATH = DATA_DIR / "simulation_clock.json"
+SIMULATION_CLOCK_PATH_ENV = "TRADERBOT_SIMULATION_CLOCK_PATH"
 _PROCESS_CLOCK_MS: ContextVar[int | None] = ContextVar("simulation_clock_ms", default=None)
 
 
@@ -34,7 +37,9 @@ def set_simulation_clock_state(as_of: str | int | float) -> int:
 def set_file_simulation_clock_state(as_of: str | int | float) -> int:
     as_of_ms = _parse_required_as_of(as_of)
     ensure_runtime_dirs()
-    SIMULATION_CLOCK_PATH.write_text(json.dumps({"as_of_ms": as_of_ms}, indent=2), encoding="utf-8")
+    path = simulation_clock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"as_of_ms": as_of_ms}, indent=2), encoding="utf-8")
     return as_of_ms
 
 
@@ -44,8 +49,9 @@ def clear_simulation_clock_state() -> None:
 
 
 def clear_file_simulation_clock_state() -> None:
-    if SIMULATION_CLOCK_PATH.exists():
-        SIMULATION_CLOCK_PATH.unlink()
+    path = simulation_clock_path()
+    if path.exists():
+        path.unlink()
 
 
 def active_simulation_clock_ms() -> int | None:
@@ -56,11 +62,17 @@ def active_simulation_clock_ms() -> int | None:
 
 
 def file_simulation_clock_ms() -> int | None:
-    if not SIMULATION_CLOCK_PATH.exists():
+    path = simulation_clock_path()
+    if not path.exists():
         return None
-    data = json.loads(SIMULATION_CLOCK_PATH.read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8"))
     value = data.get("as_of_ms")
     return int(value) if value is not None else None
+
+
+def simulation_clock_path() -> Path:
+    override = os.getenv(SIMULATION_CLOCK_PATH_ENV)
+    return Path(override) if override else SIMULATION_CLOCK_PATH
 
 
 def guarded_simulation_as_of(value: str | int | float | None) -> int | None:

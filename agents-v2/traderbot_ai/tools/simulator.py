@@ -11,7 +11,7 @@ from traderbot_ai.simulator.clock import (
     set_simulation_clock_state,
 )
 from traderbot_ai.simulator.execution import ExecutionEngine, Order
-from traderbot_ai.simulator.market_cache import DEFAULT_CACHE_PATH, LocalMarketCache
+from traderbot_ai.simulator.market_cache import DEFAULT_CACHE_PATH, LocalMarketCache, candle_freshness
 from traderbot_ai.simulator.portfolio import SimulatedPortfolio
 from traderbot_ai.tools.market import _summarize_candles, normalize_symbol, parse_time_ms
 
@@ -114,12 +114,27 @@ def get_cached_candles_impl(
             limit=max(1, min(int(lookback), 5000)),
         )
         compact = [candle.compact() for candle in candles]
+        freshness = candle_freshness(candles[-1] if candles else None, interval, as_of_ms)
+        freshness_required = as_of_ms is not None and (end_ms is None or end_ms >= as_of_ms)
+        if freshness_required and not freshness["fresh"]:
+            return _error(
+                "stale cached candle data",
+                symbol=normalize_symbol(symbol),
+                interval=interval,
+                source="local_cache",
+                as_of_ms=as_of_ms,
+                closed_only=True,
+                freshness=freshness,
+                summary=_summarize_candles(compact),
+                candles=compact,
+            )
         return _ok(
             symbol=normalize_symbol(symbol),
             interval=interval,
             source="local_cache",
             as_of_ms=as_of_ms,
             closed_only=True,
+            freshness=freshness,
             summary=_summarize_candles(compact),
             candles=compact,
         )
@@ -130,15 +145,26 @@ def get_cached_candles_impl(
 def get_cached_price_impl(symbol: str, interval: str = "1m", as_of: str | int | float | None = None) -> dict[str, Any]:
     try:
         cache = _cache()
-        candle = cache.latest_candle(symbol=symbol, interval=interval, as_of_ms=guarded_simulation_as_of(as_of))
+        as_of_ms = guarded_simulation_as_of(as_of)
+        candle = cache.latest_candle(symbol=symbol, interval=interval, as_of_ms=as_of_ms)
         if candle is None:
             return _error("no cached candle found", symbol=normalize_symbol(symbol), interval=interval)
+        freshness = candle_freshness(candle, interval, as_of_ms)
+        if not freshness["fresh"]:
+            return _error(
+                "stale cached mark price",
+                symbol=normalize_symbol(symbol),
+                interval=interval,
+                source="local_cache",
+                freshness=freshness,
+            )
         return _ok(
             symbol=candle.symbol,
             interval=interval,
             source="local_cache",
             price=candle.close,
             timestamp=candle.close_time,
+            freshness=freshness,
             candle=candle.compact(),
         )
     except Exception as error:
