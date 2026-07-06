@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import os
 import tempfile
 import unittest
 from collections import Counter
@@ -8,6 +9,7 @@ from contextlib import closing
 from pathlib import Path
 
 from traderbot_ai.screener import ScreenerStateStore, scan
+from traderbot_ai.screener.matrix import scan_window_summary
 from traderbot_ai.screener.render import to_canonical_json, to_markdown_table
 from traderbot_ai.screener.market import parse_time_ms
 from traderbot_ai.screener.state import TradingState
@@ -59,10 +61,10 @@ class ScreenerRealCacheTests(unittest.TestCase):
                 checked_rows += 1
                 self.assertEqual(row.status, "ok", f"{as_of_ms} {row.symbol} {row.data_issue}")
                 if row.candidate in {"long", "short"}:
-                    candidate_hits.append((as_of_ms, row.symbol, row.candidate, row.plan.pattern_used if row.plan else None))
+                    candidate_hits.append((as_of_ms, row.symbol, row.candidate, row.plan.pattern_used if row.plan else None, row.candidate_quality, row.failed_gates))
 
         self.assertGreaterEqual(checked_rows, 200)
-        self.assertIn((AVAX_CANDIDATE_AS_OF, "AVAXUSDT", "long", "P1"), candidate_hits)
+        self.assertIn((AVAX_CANDIDATE_AS_OF, "AVAXUSDT", "long", "P1", "hard", []), candidate_hits)
 
         result = scan(UNIVERSE, as_of_ms=AVAX_CANDIDATE_AS_OF, cache_path=self.cache_path)
         rows = {row.symbol: row for row in result.symbols}
@@ -72,7 +74,7 @@ class ScreenerRealCacheTests(unittest.TestCase):
         self.assertIsNone(rows["SOLUSDT"].candidate)
         self.assertIn("S3", rows["SOLUSDT"].failed_gates)
         self.assertIn("S9b", rows["SOLUSDT"].failed_gates)
-        self.assertIn("PAT", rows["SOLUSDT"].failed_gates)
+        self.assertIn("P1H", rows["SOLUSDT"].patterns_long)
         self.assertIsNone(rows["BTCUSDT"].candidate)
         self.assertIn("S1", rows["BTCUSDT"].failed_gates)
         self.assertIn("S2", rows["BTCUSDT"].failed_gates)
@@ -132,6 +134,119 @@ class ScreenerRealCacheTests(unittest.TestCase):
         self.assertIn("S9b", row.failed_gates)
         self.assertIn("S9c", row.failed_gates)
 
+    def test_hourly_cadence_catches_avax_signal_missed_by_adjacent_4h_samples(self) -> None:
+        before = scan(["AVAXUSDT", "BTCUSDT"], as_of_ms=parse_time_ms("2026-06-26T16:00:00Z"), cache_path=self.cache_path)
+        trigger = scan(["AVAXUSDT", "BTCUSDT"], as_of_ms=parse_time_ms("2026-06-26T17:00:00Z"), cache_path=self.cache_path)
+        after = scan(["AVAXUSDT", "BTCUSDT"], as_of_ms=parse_time_ms("2026-06-26T20:00:00Z"), cache_path=self.cache_path)
+
+        before_avax = {row.symbol: row for row in before.symbols}["AVAXUSDT"]
+        trigger_avax = {row.symbol: row for row in trigger.symbols}["AVAXUSDT"]
+        after_avax = {row.symbol: row for row in after.symbols}["AVAXUSDT"]
+
+        self.assertIsNone(before_avax.candidate)
+        self.assertEqual(trigger_avax.candidate, "long")
+        self.assertEqual(trigger_avax.plan.pattern_used, "P1")
+        self.assertIsNone(after_avax.candidate)
+
+    def test_recent_breakout_hold_recovers_pat_near_miss(self) -> None:
+        cache_path = BROAD_CACHE_PATH.parent.parent / "broad-3m-20260706" / "market_cache.sqlite3"
+        if not cache_path.exists():
+            self.skipTest(f"3m cache is required for P1H regression: {cache_path}")
+
+        cases = [
+            ("2026-07-03T13:00:00Z", "PEPEUSDT"),
+            ("2026-07-01T16:00:00Z", "ZECUSDT"),
+            ("2026-06-26T17:00:00Z", "ADAUSDT"),
+        ]
+        for as_of, symbol in cases:
+            with self.subTest(as_of=as_of, symbol=symbol):
+                result = scan([symbol, "BTCUSDT"], as_of_ms=parse_time_ms(as_of), cache_path=cache_path)
+                row = {item.symbol: item for item in result.symbols}[symbol]
+
+                self.assertEqual(row.candidate, "long")
+                self.assertEqual(row.plan.pattern_used, "P1H")
+                self.assertIn("P1H", row.patterns_long)
+                self.assertEqual(row.failed_gates, [])
+
+    def test_marginal_extension_recovers_bounded_s9b_s9c_diagnostic_winner(self) -> None:
+        cache_path = BROAD_CACHE_PATH.parent.parent / "broad-3m-20260706" / "market_cache.sqlite3"
+        if not cache_path.exists():
+            self.skipTest(f"3m cache is required for marginal extension regression: {cache_path}")
+
+        result = scan(["ADAUSDT", "BTCUSDT"], as_of_ms=parse_time_ms("2026-07-01T04:00:00Z"), cache_path=cache_path)
+        row = {item.symbol: item for item in result.symbols}["ADAUSDT"]
+
+        self.assertEqual(row.candidate, "long")
+        self.assertEqual(row.candidate_quality, "marginal_extension")
+        self.assertEqual(row.failed_gates, ["S9b", "S9c"])
+        self.assertEqual(row.plan.pattern_used, "P1")
+        self.assertIn("S9b_extension=", row.marginal_reasons[0])
+        self.assertIn("S9c_breakout=", row.marginal_reasons[1])
+
+    def test_marginal_extension_does_not_promote_extreme_or_bad_rsi_rows(self) -> None:
+        cache_path = BROAD_CACHE_PATH.parent.parent / "broad-3m-20260706" / "market_cache.sqlite3"
+        if not cache_path.exists():
+            self.skipTest(f"3m cache is required for marginal extension regression: {cache_path}")
+
+        cases = [
+            ("2026-06-22T12:00:00Z", "SUIUSDT", ["S9a", "S9b", "S9c"]),
+            ("2026-07-02T12:00:00Z", "SOLUSDT", ["S4", "S9b", "S9c"]),
+        ]
+        for as_of, symbol, failed in cases:
+            with self.subTest(as_of=as_of, symbol=symbol):
+                result = scan([symbol, "BTCUSDT"], as_of_ms=parse_time_ms(as_of), cache_path=cache_path)
+                row = {item.symbol: item for item in result.symbols}[symbol]
+
+                self.assertIsNone(row.candidate)
+                self.assertIsNone(row.candidate_quality)
+                self.assertEqual(row.failed_gates, failed)
+                self.assertEqual(row.marginal_reasons, [])
+
+    def test_scan_window_summary_reports_candidates_near_misses_and_forward_label(self) -> None:
+        summary = scan_window_summary(
+            ["AVAXUSDT", "BTCUSDT"],
+            start_ms="2026-06-26T16:00:00Z",
+            end_ms="2026-06-26T18:00:00Z",
+            step_interval="1h",
+            cache_path=self.cache_path,
+        )
+
+        self.assertEqual(summary["step_count"], 2)
+        self.assertEqual(summary["checked_rows"], 4)
+        self.assertEqual(summary["candidate_count"], 1)
+        self.assertEqual(summary["candidates"][0]["symbol"], "AVAXUSDT")
+        self.assertEqual(summary["candidates"][0]["side"], "long")
+        self.assertIn(summary["candidates"][0]["forward"]["tp_sl_first"], {"tp", "sl", "none", "ambiguous"})
+        self.assertIn("S9a", summary["single_gate_counts"])
+        self.assertTrue(summary["near_misses"][0]["forward"]["ok"])
+        self.assertGreaterEqual(summary["near_misses"][0]["forward"]["bars_1m"], 1)
+
+        marginal_cache = BROAD_CACHE_PATH.parent.parent / "broad-3m-20260706" / "market_cache.sqlite3"
+        if marginal_cache.exists():
+            marginal = scan_window_summary(
+                ["ADAUSDT", "BTCUSDT"],
+                start_ms="2026-07-01T04:00:00Z",
+                end_ms="2026-07-01T05:00:00Z",
+                step_interval="1h",
+                cache_path=marginal_cache,
+            )
+            self.assertEqual(marginal["candidate_quality_counts"], {"marginal_extension": 1})
+            self.assertEqual(marginal["extension_gate_counts"], {"S9b+S9c": 1})
+            self.assertEqual(marginal["candidates"][0]["quality"], "marginal_extension")
+            self.assertEqual(marginal["candidates"][0]["failed_gates"], ["S9b", "S9c"])
+            self.assertEqual(marginal["extension_misses"][0]["candidate_quality"], "marginal_extension")
+
+        uneven = scan_window_summary(
+            ["AVAXUSDT", "BTCUSDT"],
+            start_ms="2026-06-26T16:00:00Z",
+            end_ms="2026-06-26T18:30:00Z",
+            step_interval="1h",
+            cache_path=self.cache_path,
+            include_forward=False,
+        )
+        self.assertEqual(uneven["step_count"], 3)
+        self.assertEqual(uneven["checked_rows"], 6)
+
     def test_broad_month_cache_matrix_has_expected_candidates_and_no_data_leaks(self) -> None:
         if self.cache_path != BROAD_CACHE_PATH:
             self.skipTest("broad month cache is required for this regression")
@@ -146,7 +261,7 @@ class ScreenerRealCacheTests(unittest.TestCase):
 
         as_of_ms = MONTH_START_MS
         while as_of_ms < MONTH_END_MS:
-            state = TradingState(last_candidate_ts=dict(state_store.last_candidate_ts))
+            state = TradingState(last_candidate_ts=dict(state_store.last_candidate_ts), last_candidate_quality=dict(state_store.last_candidate_quality))
             result = scan(symbols, as_of_ms=as_of_ms, cache_path=self.cache_path, state=state)
             state_store.update_from_scan_rows([row.model_dump(mode="json") for row in result.symbols], as_of_ms)
 
@@ -159,7 +274,7 @@ class ScreenerRealCacheTests(unittest.TestCase):
                 if row.symbol != MISSING_SYMBOL:
                     self.assertEqual(row.status, "ok", f"{as_of_ms} {row.symbol} {row.data_issue}")
                 if row.candidate in {"long", "short"}:
-                    candidate_hits.append((as_of_ms, row.symbol, row.candidate, row.plan.pattern_used if row.plan else None))
+                    candidate_hits.append((as_of_ms, row.symbol, row.candidate, row.plan.pattern_used if row.plan else None, row.candidate_quality, row.failed_gates))
             as_of_ms += FOUR_HOURS_MS
 
         self.assertEqual(checked_rows, 220 * len(symbols))
@@ -170,10 +285,60 @@ class ScreenerRealCacheTests(unittest.TestCase):
         self.assertEqual(
             candidate_hits,
             [
-                (parse_time_ms("2026-06-10T16:00:00Z"), "BTCUSDT", "long", "P1"),
-                (parse_time_ms("2026-07-01T16:00:00Z"), "DOGEUSDT", "long", "P1"),
+                (parse_time_ms("2026-06-02T16:00:00Z"), "SUIUSDT", "short", "P1H", "marginal_extension", ["S9b", "S9c"]),
+                (parse_time_ms("2026-06-05T08:00:00Z"), "ETHUSDT", "short", "P1H", "marginal_extension", ["S9b"]),
+                (parse_time_ms("2026-06-05T16:00:00Z"), "DOGEUSDT", "short", "P1H", "marginal_extension", ["S9b"]),
+                (parse_time_ms("2026-06-05T16:00:00Z"), "LINKUSDT", "short", "P1", "marginal_extension", ["S9b"]),
+                (parse_time_ms("2026-06-10T16:00:00Z"), "BTCUSDT", "long", "P1", "hard", []),
+                (parse_time_ms("2026-06-15T12:00:00Z"), "PEPEUSDT", "long", "P1", "marginal_extension", ["S9b", "S9c"]),
+                (parse_time_ms("2026-06-19T20:00:00Z"), "AVAXUSDT", "short", "P1H", "marginal_extension", ["S9b"]),
+                (parse_time_ms("2026-06-20T00:00:00Z"), "ZECUSDT", "long", "P1", "marginal_extension", ["S9b", "S9c"]),
+                (parse_time_ms("2026-06-23T08:00:00Z"), "SUIUSDT", "short", "P1H", "marginal_extension", ["S9b", "S9c"]),
+                (parse_time_ms("2026-06-25T16:00:00Z"), "XRPUSDT", "short", "P1H", "marginal_extension", ["S9b"]),
+                (parse_time_ms("2026-06-25T16:00:00Z"), "PEPEUSDT", "short", "P1H", "marginal_extension", ["S9b"]),
+                (parse_time_ms("2026-06-29T04:00:00Z"), "AVAXUSDT", "long", "P1", "marginal_extension", ["S9b", "S9c"]),
+                (parse_time_ms("2026-07-01T04:00:00Z"), "ADAUSDT", "long", "P1", "marginal_extension", ["S9b", "S9c"]),
+                (parse_time_ms("2026-07-01T16:00:00Z"), "ETHUSDT", "long", "P1", "marginal_extension", ["S9b"]),
+                (parse_time_ms("2026-07-01T16:00:00Z"), "DOGEUSDT", "long", "P1", "hard", []),
+                (parse_time_ms("2026-07-01T16:00:00Z"), "LINKUSDT", "long", "P1", "marginal_extension", ["S9b", "S9c"]),
+                (parse_time_ms("2026-07-01T16:00:00Z"), "ZECUSDT", "long", "P1H", "hard", []),
+                (parse_time_ms("2026-07-03T04:00:00Z"), "ADAUSDT", "long", "P1H", "marginal_extension", ["S9b"]),
             ],
         )
+
+    def test_broad_month_hourly_matrix_has_expected_candidates_when_enabled(self) -> None:
+        if os.environ.get("TRADERBOT_RUN_SLOW_SCREENER_TESTS") != "1":
+            self.skipTest("set TRADERBOT_RUN_SLOW_SCREENER_TESTS=1 for the full 1h real-cache month matrix")
+        if self.cache_path != BROAD_CACHE_PATH:
+            self.skipTest("broad month cache is required for this regression")
+
+        symbols = [*UNIVERSE, MISSING_SYMBOL]
+        summary = scan_window_summary(
+            symbols,
+            start_ms=MONTH_START_MS,
+            end_ms=MONTH_END_MS,
+            step_interval="1h",
+            cache_path=self.cache_path,
+            include_forward=False,
+        )
+
+        self.assertEqual(summary["step_count"], 880)
+        self.assertEqual(summary["checked_rows"], 880 * len(symbols))
+        self.assertEqual(summary["status_counts"]["ok"], 880 * len(UNIVERSE))
+        self.assertEqual(summary["status_counts"]["insufficient_data"], 880)
+        self.assertEqual(summary["data_warnings"][f"{MISSING_SYMBOL}:insufficient_data"], 880)
+        self.assertEqual(summary["candidate_count"], 69)
+        self.assertEqual(summary["candidate_quality_counts"], {"hard": 27, "marginal_extension": 42})
+        self.assertEqual(summary["extension_gate_counts"], {"S9b+S9c": 92, "S9b": 59, "S9c": 5})
+        self.assertEqual(summary["hard_candidate_cooldown_block_counts"], {"hard": 5})
+        candidates = {
+            (item["as_of_iso"], item["symbol"], item["side"], item["pattern"], item["quality"], tuple(item["failed_gates"]))
+            for item in summary["candidates"]
+        }
+        self.assertIn(("2026-06-26T17:00:00Z", "AVAXUSDT", "long", "P1", "hard", ()), candidates)
+        self.assertIn(("2026-07-01T04:00:00Z", "ADAUSDT", "long", "P1", "marginal_extension", ("S9b", "S9c")), candidates)
+        self.assertIn(("2026-07-01T16:00:00Z", "ETHUSDT", "long", "P1", "marginal_extension", ("S9b",)), candidates)
+        self.assertIn(("2026-07-03T13:00:00Z", "PEPEUSDT", "long", "P1H", "hard", ()), candidates)
 
 
 def _symbols_with_1h(cache_path: Path) -> set[str]:

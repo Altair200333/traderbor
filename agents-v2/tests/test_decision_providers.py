@@ -48,6 +48,7 @@ def replay_context() -> dict:
 
 def deterministic_replay_context() -> dict:
     context = replay_context()
+    context["decision_interval"] = "1h"
     context.update(
         {
             "screener_mode": "deterministic",
@@ -107,6 +108,9 @@ class DecisionProviderTests(unittest.TestCase):
         self.assertIn("Screener mode: deterministic.", prompt)
         self.assertIn("sha256-test", prompt)
         self.assertIn("| ETHUSDT | long | P2 |", prompt)
+        self.assertIn("scanned every closed 1h bar", prompt)
+        self.assertIn("screening survivors, not trade recommendations", prompt)
+        self.assertIn("Hold is the default for marginal survivors", prompt)
         self.assertIn("Do not call scan_momentum_universe", prompt)
         self.assertIn("use get_setup_digest", prompt)
         self.assertIn("Never call close_position, cancel_order, or settle_exchange", prompt)

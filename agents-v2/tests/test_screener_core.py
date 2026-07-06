@@ -14,7 +14,7 @@ from traderbot_ai.screener.patterns import PatternHit, detect_patterns
 from traderbot_ai.screener.plan import build_plan_primitives
 from traderbot_ai.screener.render import to_canonical_json, to_markdown_table
 from traderbot_ai.screener.screener import scan
-from traderbot_ai.screener.state import OpenPosition, ScreenerStateStore, TradingState, state_from_wallet_and_events
+from traderbot_ai.screener.state import OpenPosition, ScreenerStateStore, TradingState, candidate_cooldown_key, state_from_wallet_and_events
 from traderbot_ai.simulator.market_cache import Candle, LocalMarketCache
 from traderbot_ai.screener.market import INTERVAL_MS
 
@@ -120,6 +120,18 @@ class ScreenerPatternGatePlanTests(unittest.TestCase):
         no_hits = detect_patterns(no_hit_frame, [None] * no_hit_frame.length, [None] * no_hit_frame.length, [None] * no_hit_frame.length, ScreenerConfig())
         self.assertNotIn("P1", [hit.id for hit in no_hits if hit.side == "long"])
 
+    def test_p1h_detects_recent_breakout_hold_without_current_bar_breakout(self) -> None:
+        closes = [99.0] * 20 + [101.0, 101.2, 101.1]
+        highs = [100.0] * 20 + [101.5, 101.4, 101.3]
+        frame = _frame_from_prices(closes, highs=highs)
+        hits = detect_patterns(frame, [None] * frame.length, [None] * frame.length, [None] * frame.length, ScreenerConfig())
+        long_hits = [hit for hit in hits if hit.side == "long"]
+
+        self.assertNotIn("P1", [hit.id for hit in long_hits])
+        p1h = next(hit for hit in long_hits if hit.id == "P1H")
+        self.assertEqual(p1h.boundary_price, 100.0)
+        self.assertEqual(p1h.detail["age_bars"], 2)
+
     def test_p2_uses_per_bar_ema_and_loose_touch_semantics(self) -> None:
         closes = [100.0] * 23 + [103.0]
         highs = [101.0] * 23 + [104.0]
@@ -198,6 +210,31 @@ class ScreenerPatternGatePlanTests(unittest.TestCase):
         self.assertFalse(gates["S9c"].passed)
         self.assertIsNone(gates["S8"].passed)
 
+    def test_p1h_breakout_hold_still_uses_s9c_breakout_distance(self) -> None:
+        cfg = ScreenerConfig()
+        p1h = PatternHit(id="P1H", side="long", boundary_price=100.0)
+        gates = evaluate_signal_gates(
+            "long",
+            close=103.0,
+            roc_4h=0.04,
+            roc_24h=0.05,
+            roc_1h_last=0.01,
+            vol_ratio=3.0,
+            rsi=65.0,
+            atr=2.0,
+            atr_pct=0.02,
+            ema20=102.5,
+            ema50=99.0,
+            btc_roc_4h=0.0,
+            funding=None,
+            patterns=[p1h],
+            cfg=cfg,
+        )
+
+        self.assertFalse(gates["S9c"].passed)
+        self.assertEqual(gates["S9c"].value, 1.5)
+        self.assertEqual(gates["S9c"].reason, "S9c_breakout_extension")
+
     def test_plan_primitives_prioritize_p2_and_keep_stop_feasibility(self) -> None:
         cfg = ScreenerConfig()
         frame = _frame_from_prices([100.0] * 30, lows=[99.0] * 27 + [97.0, 98.0, 99.0])
@@ -205,6 +242,7 @@ class ScreenerPatternGatePlanTests(unittest.TestCase):
             PatternHit(id="P1", side="long", boundary_price=99.0),
             PatternHit(id="P2", side="long", boundary_price=97.0),
             PatternHit(id="P3", side="long", boundary_price=99.0),
+            PatternHit(id="P1H", side="long", boundary_price=99.0),
         ]
         plan = build_plan_primitives("long", patterns, frame, atr_value=2.0, cfg=cfg)
         self.assertEqual(plan.pattern_used, "P2")
@@ -243,10 +281,18 @@ class ScreenerScanArtifactTests(unittest.TestCase):
         self.assertIn("| sym |", markdown)
         self.assertNotIn("None", markdown)
 
-    def test_state_store_updates_from_signal_candidate_before_state(self) -> None:
+    def test_state_store_updates_from_surfaced_candidate_only(self) -> None:
         store = ScreenerStateStore()
         store.update_from_scan_rows([{"symbol": BTC, "signal_candidate_before_state": "long", "candidate": None}], BASE_MS)
-        self.assertEqual(store.last_candidate_ts[BTC], BASE_MS)
+        self.assertEqual(store.last_candidate_ts, {})
+
+        store.update_from_scan_rows([{"symbol": BTC, "signal_candidate_before_state": "long", "candidate": "long"}], BASE_MS + ONE_HOUR)
+        self.assertEqual(store.last_candidate_ts[candidate_cooldown_key(BTC, "long")], BASE_MS + ONE_HOUR)
+        self.assertEqual(store.last_candidate_quality[candidate_cooldown_key(BTC, "long")], "hard")
+        self.assertNotIn(candidate_cooldown_key(BTC, "short"), store.last_candidate_ts)
+
+        store.update_from_scan_rows([{"symbol": BTC, "candidate": "short", "candidate_quality": "marginal_extension"}], BASE_MS + 2 * ONE_HOUR)
+        self.assertEqual(store.last_candidate_quality[candidate_cooldown_key(BTC, "short")], "marginal_extension")
 
     def test_trading_state_reconstructs_risk_counters_from_exchange_events(self) -> None:
         as_of = BASE_MS + 30 * ONE_HOUR
@@ -299,10 +345,10 @@ class ScreenerScanArtifactTests(unittest.TestCase):
             },
         ]
 
-        state = state_from_wallet_and_events(wallet, events, as_of, last_candidate_ts={BTC: BASE_MS})
+        state = state_from_wallet_and_events(wallet, events, as_of, last_candidate_ts={candidate_cooldown_key(BTC, "long"): BASE_MS})
 
         self.assertEqual(state.trades_opened_today, 1)
-        self.assertEqual(state.last_candidate_ts[BTC], BASE_MS)
+        self.assertEqual(state.last_candidate_ts[candidate_cooldown_key(BTC, "long")], BASE_MS)
         self.assertEqual(state.last_stopout_ts[BTC], as_of - 50 * 60_000)
         self.assertEqual(state.last_stopout_ts["SOLUSDT"], as_of - 30 * 60_000)
         self.assertEqual(state.consecutive_stopouts, 2)
@@ -347,7 +393,7 @@ class ScreenerScanArtifactTests(unittest.TestCase):
 
     def test_state_cooldown_boundaries_are_strictly_less_than_duration(self) -> None:
         cfg = ScreenerConfig()
-        state = TradingState(last_candidate_ts={BTC: BASE_MS}, last_stopout_ts={BTC: BASE_MS})
+        state = TradingState(last_candidate_ts={candidate_cooldown_key(BTC, "long"): BASE_MS}, last_stopout_ts={BTC: BASE_MS})
 
         before_candidate, _ = state_blocks(BTC, "long", state, BASE_MS + cfg.cooldown_candidate_ms - 1, cfg)
         at_candidate, _ = state_blocks(BTC, "long", state, BASE_MS + cfg.cooldown_candidate_ms, cfg)
@@ -358,6 +404,37 @@ class ScreenerScanArtifactTests(unittest.TestCase):
         self.assertNotIn("cooldown_candidate", at_candidate)
         self.assertIn("cooldown_stopout", before_stopout)
         self.assertNotIn("cooldown_stopout", at_stopout)
+
+    def test_candidate_cooldown_is_side_specific(self) -> None:
+        cfg = ScreenerConfig()
+        state = TradingState(last_candidate_ts={candidate_cooldown_key(BTC, "long"): BASE_MS})
+
+        long_blocks, _ = state_blocks(BTC, "long", state, BASE_MS + ONE_HOUR, cfg)
+        short_blocks, _ = state_blocks(BTC, "short", state, BASE_MS + ONE_HOUR, cfg)
+
+        self.assertIn("cooldown_candidate", long_blocks)
+        self.assertNotIn("cooldown_candidate", short_blocks)
+
+    def test_hard_signal_can_override_marginal_candidate_cooldown(self) -> None:
+        cfg = ScreenerConfig()
+        key = candidate_cooldown_key(BTC, "long")
+        state = TradingState(last_candidate_ts={key: BASE_MS}, last_candidate_quality={key: "marginal_extension"})
+
+        hard_blocks, _ = state_blocks(BTC, "long", state, BASE_MS + ONE_HOUR, cfg, signal_quality="hard")
+        marginal_blocks, _ = state_blocks(BTC, "long", state, BASE_MS + ONE_HOUR, cfg, signal_quality="marginal_extension")
+
+        self.assertNotIn("cooldown_candidate", hard_blocks)
+        self.assertIn("cooldown_candidate", marginal_blocks)
+
+    def test_legacy_symbol_only_candidate_cooldown_still_blocks_during_migration(self) -> None:
+        cfg = ScreenerConfig()
+        state = TradingState(last_candidate_ts={BTC: BASE_MS})
+
+        long_blocks, _ = state_blocks(BTC, "long", state, BASE_MS + ONE_HOUR, cfg)
+        short_blocks, _ = state_blocks(BTC, "short", state, BASE_MS + ONE_HOUR, cfg)
+
+        self.assertIn("cooldown_candidate", long_blocks)
+        self.assertIn("cooldown_candidate", short_blocks)
 
     def test_scan_reports_global_blocks_without_per_symbol_global_block_noise(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

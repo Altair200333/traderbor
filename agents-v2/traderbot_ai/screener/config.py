@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 
 class ScreenerConfig(BaseModel):
-    version: str = "screener-1.0.0"
+    version: str = "screener-1.1.0"
     min_1h_bars: int = 168
     min_4h_bars: int = 60
     roc_4h_long: float = 0.025
@@ -32,7 +32,13 @@ class ScreenerConfig(BaseModel):
     last_hour_share_max: float = 0.6
     ext_atr_max: float = 2.0
     breakout_dist_atr_max: float = 1.0
+    marginal_extension_enabled: bool = True
+    marginal_ext_atr_max: float = 2.5
+    marginal_breakout_dist_atr_max: float = 1.6
+    marginal_extension_max_per_scan: int = 2
+    marginal_extension_patterns: tuple[str, ...] = ("P1", "P1H", "P3")
     p1_lookback: int = 20
+    p1_hold_bars: int = 6
     p2_trend_window: int = 24
     p2_trend_share: float = 0.80
     p2_pullback_bars: int = 3
@@ -45,7 +51,7 @@ class ScreenerConfig(BaseModel):
     stop_pct_max: float = 0.040
     struct_buffer_p1_p3_atr: float = 0.3
     struct_buffer_p2_atr: float = 0.25
-    tp_rr_default: dict[str, float] = Field(default_factory=lambda: {"P1": 2.5, "P2": 2.0, "P3": 2.5})
+    tp_rr_default: dict[str, float] = Field(default_factory=lambda: {"P1": 2.5, "P1H": 2.0, "P2": 2.0, "P3": 2.5})
     cooldown_candidate_ms: int = 4 * 3_600_000
     cooldown_stopout_ms: int = 24 * 3_600_000
     max_open_positions: int = 3

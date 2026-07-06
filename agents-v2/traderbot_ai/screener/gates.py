@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from traderbot_ai.screener.config import ScreenerConfig
 from traderbot_ai.screener.market import normalize_symbol
 from traderbot_ai.screener.patterns import PatternHit, Side
-from traderbot_ai.screener.state import TradingState
+from traderbot_ai.screener.state import CandidateQuality, TradingState, candidate_cooldown_entry
 
 
 class GateResult(BaseModel):
@@ -51,7 +51,7 @@ def evaluate_signal_gates(
     }
 
 
-def state_blocks(symbol: str, side: Side, state: TradingState, as_of_ms: int, cfg: ScreenerConfig) -> tuple[list[str], list[str]]:
+def state_blocks(symbol: str, side: Side, state: TradingState, as_of_ms: int, cfg: ScreenerConfig, signal_quality: CandidateQuality | None = None) -> tuple[list[str], list[str]]:
     normalized = normalize_symbol(symbol)
     per_symbol = []
     global_blocks = scan_global_blocks(state, cfg)
@@ -60,9 +60,10 @@ def state_blocks(symbol: str, side: Side, state: TradingState, as_of_ms: int, cf
         per_symbol.append("max_same_direction")
     if any(normalize_symbol(position.symbol) == normalized for position in state.open_positions):
         per_symbol.append("position_open")
-    last_candidate = state.last_candidate_ts.get(normalized)
+    last_candidate, last_quality = candidate_cooldown_entry(normalized, side, state)
     if last_candidate is not None and int(as_of_ms) - int(last_candidate) < cfg.cooldown_candidate_ms:
-        per_symbol.append("cooldown_candidate")
+        if not (signal_quality == "hard" and last_quality == "marginal_extension"):
+            per_symbol.append("cooldown_candidate")
     last_stopout = state.last_stopout_ts.get(normalized)
     if last_stopout is not None and int(as_of_ms) - int(last_stopout) < cfg.cooldown_stopout_ms:
         per_symbol.append("cooldown_stopout")
@@ -151,7 +152,7 @@ def _extension(close: float, ema20: float | None, atr: float | None, cfg: Screen
 
 
 def _breakout_distance(side: Side, close: float, atr: float | None, patterns: list[PatternHit], cfg: ScreenerConfig) -> GateResult:
-    breakout_patterns = [pattern for pattern in patterns if pattern.id in {"P1", "P3"} and pattern.boundary_price is not None]
+    breakout_patterns = [pattern for pattern in patterns if pattern.id in {"P1", "P1H", "P3"} and pattern.boundary_price is not None]
     if not breakout_patterns:
         return GateResult(passed=True, reason="not_applicable")
     if atr is None or atr == 0:

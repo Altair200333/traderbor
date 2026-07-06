@@ -23,10 +23,11 @@ def to_markdown_table(result: ScanResult) -> str:
 def _row(row: SymbolRow) -> str:
     marker = "*" if row.candidate else ""
     side = row.candidate or row.signal_candidate_before_state or "-"
+    quality = f":{row.candidate_quality}" if row.candidate_quality else ""
     patterns = ",".join(row.patterns_long if side == "long" else row.patterns_short if side == "short" else row.patterns_long + row.patterns_short) or "-"
     fail = ",".join(row.blocked_by or row.failed_gates or ([row.data_issue.get("reason", row.status)] if row.data_issue else [])) or "-"
     return (
-        f"| {marker}{row.symbol} | {side} | {_num(row.close)} | {_pct(row.roc_4h)} | {_pct(row.roc_24h)} | "
+        f"| {marker}{row.symbol} | {side}{quality} | {_num(row.close)} | {_pct(row.roc_4h)} | {_pct(row.roc_24h)} | "
         f"{_num(row.vol_ratio, 1)} | {_num(row.rsi, 0)} | {_pct(row.atr_pct)} | {_ext(row.ema20_ext_atr)} | {patterns} | {fail} |"
     )
 

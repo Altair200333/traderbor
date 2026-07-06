@@ -85,6 +85,10 @@ def build_exchange_replay_config(
         raise ValueError(f"unsupported execution_interval: {execution_interval}")
     if screener_mode not in {"off", "deterministic", "legacy-self-screen"}:
         raise ValueError("screener_mode must be off, deterministic, or legacy-self-screen")
+    if screener_mode == "deterministic" and decision_interval != "1h":
+        raise ValueError("deterministic screener replay requires decision_interval=1h")
+    if screener_mode == "deterministic":
+        _validate_deterministic_replay_timing(start_ms, end_ms, decision_interval)
     fee_rate_value = float(fee_rate)
     if not math.isfinite(fee_rate_value) or fee_rate_value < 0:
         raise ValueError("fee_rate must be non-negative")
@@ -118,6 +122,10 @@ def run_exchange_replay(
     cache: LocalMarketCache | None = None,
     exchange: SimulatedExchange | None = None,
 ) -> dict[str, Any]:
+    if config.screener_mode == "deterministic" and config.decision_interval != "1h":
+        raise ValueError("deterministic screener replay requires decision_interval=1h")
+    if config.screener_mode == "deterministic":
+        _validate_deterministic_replay_timing(config.start_ms, config.end_ms, config.decision_interval)
     if exchange is not None and Path(exchange.path).resolve() != Path(_required_path(config.state_path)).resolve():
         raise ValueError("exchange state path must match replay config state path")
     if exchange is not None and Path(exchange.events_path).resolve() != Path(_required_path(config.events_path)).resolve():
@@ -308,6 +316,7 @@ def _build_deterministic_scan_context(
         _read_jsonl_since(_required_path(config.events_path), 0),
         as_of_ms,
         last_candidate_ts=screener_state.last_candidate_ts,
+        last_candidate_quality=screener_state.last_candidate_quality,
     )
     result = run_screener(
         symbols=list(config.symbols),
@@ -323,6 +332,9 @@ def _build_deterministic_scan_context(
         {
             "symbol": row.symbol,
             "side": row.candidate,
+            "quality": row.candidate_quality or "hard",
+            "failed_gates": row.failed_gates,
+            "marginal_reasons": row.marginal_reasons,
             "plan": None if row.plan is None else row.plan.model_dump(mode="json"),
             "signal_candidate_before_state": row.signal_candidate_before_state,
         }
@@ -410,6 +422,12 @@ def _auto_hold_decision(context: dict[str, Any]) -> dict[str, Any]:
         "scan_hash": context.get("scan_hash"),
         "scan_artifact_path": context.get("scan_artifact_path"),
     }
+
+
+def _validate_deterministic_replay_timing(start_ms: int, end_ms: int, decision_interval: str) -> None:
+    step_ms = INTERVAL_MS[decision_interval]
+    if int(start_ms) % step_ms != 0 or int(end_ms) % step_ms != 0:
+        raise ValueError("deterministic screener replay requires start_time and end_time aligned to closed 1h boundaries")
 
 
 def _compact_scan_context(context: dict[str, Any]) -> dict[str, Any] | None:
@@ -517,7 +535,8 @@ def _validate_decision_exchange_consistency(
 
 
 def _place_order_event_matches_decision(event: dict[str, Any], decision: dict[str, Any], final_decision: str) -> bool:
-    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    raw_payload = event.get("payload")
+    payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
     if str(payload.get("category", "")).lower() != "linear":
         return False
     if str(payload.get("orderType", "")).lower() != "market":
@@ -532,7 +551,8 @@ def _place_order_event_matches_decision(event: dict[str, Any], decision: dict[st
     amount = _optional_float(decision.get("amount"))
     if amount is None or amount <= 0:
         return False
-    position = payload.get("position") if isinstance(payload.get("position"), dict) else {}
+    raw_position = payload.get("position")
+    position: dict[str, Any] = raw_position if isinstance(raw_position, dict) else {}
     if not position:
         return False
     if str(position.get("category", "")).lower() != "linear":
@@ -558,7 +578,8 @@ def _place_order_event_matches_decision(event: dict[str, Any], decision: dict[st
 
 
 def _set_leverage_event_matches_decision(event: dict[str, Any], decision: dict[str, Any]) -> bool:
-    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    raw_payload = event.get("payload")
+    payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
     if str(payload.get("category", "")).lower() != "linear":
         return False
     return _symbols_match(payload.get("symbol"), decision.get("symbol"))

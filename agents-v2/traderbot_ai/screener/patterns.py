@@ -10,7 +10,7 @@ from traderbot_ai.screener.data import CandleFrame
 
 
 Side = Literal["long", "short"]
-PatternId = Literal["P1", "P2", "P3"]
+PatternId = Literal["P1", "P1H", "P2", "P3"]
 
 
 class PatternHit(BaseModel):
@@ -42,6 +42,9 @@ def _side_patterns(side: Side, frame: CandleFrame, ema20: list[float | None], em
         hit = close > boundary if side == "long" else close < boundary
         if hit:
             result.append(PatternHit(id="P1", side=side, boundary_price=boundary, detail={"lookback": cfg.p1_lookback}))
+        accepted = _recent_p1_hold(side, frame, cfg)
+        if accepted is not None:
+            result.append(accepted)
     if t >= cfg.p2_trend_window - 1:
         start = t - cfg.p2_trend_window + 1
         trend_count = 0
@@ -79,3 +82,25 @@ def _side_patterns(side: Side, frame: CandleFrame, ema20: list[float | None], em
             if compressed and breakout:
                 result.append(PatternHit(id="P3", side=side, boundary_price=boundary, detail={"atr_now": current_atr, "atr_then": previous_atr, "compression": cfg.p3_atr_compression}))
     return result
+
+
+def _recent_p1_hold(side: Side, frame: CandleFrame, cfg: ScreenerConfig) -> PatternHit | None:
+    t = frame.length - 1
+    close = frame.close[t]
+    max_age = min(cfg.p1_hold_bars, t - cfg.p1_lookback)
+    for age in range(1, max_age + 1):
+        trigger = t - age
+        high_boundary = max(frame.high[trigger - cfg.p1_lookback : trigger])
+        low_boundary = min(frame.low[trigger - cfg.p1_lookback : trigger])
+        boundary = high_boundary if side == "long" else low_boundary
+        trigger_close = frame.close[trigger]
+        triggered = trigger_close > boundary if side == "long" else trigger_close < boundary
+        held = close > boundary if side == "long" else close < boundary
+        if triggered and held:
+            return PatternHit(
+                id="P1H",
+                side=side,
+                boundary_price=boundary,
+                detail={"lookback": cfg.p1_lookback, "age_bars": age, "trigger_close": trigger_close},
+            )
+    return None

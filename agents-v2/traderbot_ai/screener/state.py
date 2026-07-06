@@ -12,6 +12,7 @@ from traderbot_ai.screener.market import normalize_symbol
 
 
 Side = Literal["long", "short"]
+CandidateQuality = Literal["hard", "marginal_extension"]
 
 
 class OpenPosition(BaseModel):
@@ -29,6 +30,7 @@ class OpenPosition(BaseModel):
 class TradingState(BaseModel):
     open_positions: list[OpenPosition] = Field(default_factory=list)
     last_candidate_ts: dict[str, int] = Field(default_factory=dict)
+    last_candidate_quality: dict[str, CandidateQuality] = Field(default_factory=dict)
     last_stopout_ts: dict[str, int] = Field(default_factory=dict)
     trades_opened_today: int = 0
     consecutive_stopouts: int = 0
@@ -39,6 +41,7 @@ class TradingState(BaseModel):
 
 class ScreenerStateStore(BaseModel):
     last_candidate_ts: dict[str, int] = Field(default_factory=dict)
+    last_candidate_quality: dict[str, CandidateQuality] = Field(default_factory=dict)
 
     @classmethod
     def load(cls, path: str | Path) -> "ScreenerStateStore":
@@ -54,13 +57,31 @@ class ScreenerStateStore(BaseModel):
 
     def update_from_scan_rows(self, rows: list[dict], as_of_ms: int) -> None:
         for row in rows:
-            side = row.get("signal_candidate_before_state")
+            side = row.get("candidate")
             symbol = row.get("symbol")
             if symbol and side in {"long", "short"}:
-                self.last_candidate_ts[str(symbol)] = int(as_of_ms)
+                key = candidate_cooldown_key(str(symbol), side)
+                quality = row.get("candidate_quality") or "hard"
+                self.last_candidate_ts[key] = int(as_of_ms)
+                if quality in {"hard", "marginal_extension"}:
+                    self.last_candidate_quality[key] = quality
 
 
-def state_from_wallet(wallet: dict, last_candidate_ts: dict[str, int] | None = None) -> TradingState:
+def candidate_cooldown_key(symbol: str, side: Side) -> str:
+    return f"{normalize_symbol(symbol)}:{side}"
+
+
+def candidate_cooldown_entry(symbol: str, side: Side, state: TradingState) -> tuple[int | None, CandidateQuality | None]:
+    normalized = normalize_symbol(symbol)
+    side_key = candidate_cooldown_key(normalized, side)
+    if side_key in state.last_candidate_ts:
+        return state.last_candidate_ts.get(side_key), state.last_candidate_quality.get(side_key)
+    if normalized in state.last_candidate_ts:
+        return state.last_candidate_ts.get(normalized), state.last_candidate_quality.get(normalized)
+    return None, None
+
+
+def state_from_wallet(wallet: dict, last_candidate_ts: dict[str, int] | None = None, last_candidate_quality: dict[str, CandidateQuality] | None = None) -> TradingState:
     positions = []
     for item in wallet.get("open_positions") or []:
         positions.append(
@@ -72,7 +93,7 @@ def state_from_wallet(wallet: dict, last_candidate_ts: dict[str, int] | None = N
                 orderLinkId=item.get("orderLinkId"),
             )
         )
-    return TradingState(open_positions=positions, last_candidate_ts=dict(last_candidate_ts or {}))
+    return TradingState(open_positions=positions, last_candidate_ts=dict(last_candidate_ts or {}), last_candidate_quality=dict(last_candidate_quality or {}))
 
 
 def state_from_wallet_and_events(
@@ -80,8 +101,9 @@ def state_from_wallet_and_events(
     events: list[dict[str, Any]],
     as_of_ms: int,
     last_candidate_ts: dict[str, int] | None = None,
+    last_candidate_quality: dict[str, CandidateQuality] | None = None,
 ) -> TradingState:
-    state = state_from_wallet(wallet, last_candidate_ts=last_candidate_ts)
+    state = state_from_wallet(wallet, last_candidate_ts=last_candidate_ts, last_candidate_quality=last_candidate_quality)
     equity = _wallet_equity(wallet)
     day_start = _utc_day_start_ms(as_of_ms)
     week_start = int(as_of_ms) - 7 * 24 * 60 * 60_000

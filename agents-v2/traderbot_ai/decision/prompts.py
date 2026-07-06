@@ -63,7 +63,7 @@ Decision interval: {context["decision_interval"]}
 Execution interval: {context["execution_interval"]}
 Fee rate: {context["fee_rate"]}
 Screener mode: deterministic.
-Agent cadence in this runner: candidate-driven by the runner-side deterministic screener. In this call, the runner has already scanned closed 1h data at the exact as_of.
+Agent cadence in this runner: candidate-driven by the runner-side deterministic screener. In this call, the runner has already scanned every closed 1h bar up to the exact as_of.
 Strategy horizon: 4h to 24h swing momentum.
 Worklog memory root: {current_worklog_root()}.
 
@@ -100,7 +100,9 @@ Follow the deterministic replay procedure:
 3. Do not call raw get_candles for broad symbol screening. If a finalist needs more structure, use get_setup_digest for that exact candidate and side.
 4. Consider only symbols present in deterministic screener candidates for a new long/short entry.
 5. Reconstruct risk state from wallet, settlement, maintenance actions, and recent event helpers if needed.
-6. Build and validate a plan only for a surviving deterministic candidate.
+6. Treat deterministic candidates as screening survivors, not trade recommendations. Hold is the default for marginal survivors.
+7. Candidate quality matters: quality=hard means all S1-S9 gates passed; quality=marginal_extension means only bounded S9b/S9c extension gates failed on a P1/P1H/P3 setup. Marginal extension candidates require stronger structure/context and should usually be held.
+8. Build and validate a plan only for a surviving deterministic candidate.
 For simulator linear orders, TradeDecision.amount and calculate_position_size.amount are USDT notional, but place_order.qty is base-asset quantity: qty = USDT notional / current entry price. Do not pass USDT notional as linear qty.
 Trade only valid momentum setups; otherwise return hold.
 Never request 1m candles for signal analysis.

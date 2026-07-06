@@ -241,6 +241,7 @@ Step 4. Shortlist deep check:
   - For P1/P3 breakouts, the breakout bar must close within 1.0 * ATR(14, 1h) of the broken boundary. If price ran farther, hold and wait for retest or a fresh continuation setup.
 - Pattern must be at least one of:
   - P1 range breakout: close_1h above max high or below min low of the previous 20 closed 1h bars.
+  - P1H accepted breakout hold: a P1 range breakout happened within the previous 6 closed 1h bars and the current close still holds beyond that original boundary.
   - P2 pullback continuation: at least 80% of the last 24 closed 1h bars on the trend side of EMA50, a touch of EMA20 within the last 3 bars, and current close beyond the previous bar extreme.
   - P3 compression breakout: ATR(14, 1h) now <= 0.7 * ATR(14, 1h) 72h ago, plus a break of the 48h range boundary.
 - A candidate that fails any gate is dead for this step. If the setup is mixed, stale, or unsupported by data, return hold.
@@ -250,7 +251,7 @@ Step 5. Plan construction:
 - P1/P3 structural stop: beyond the broken boundary with a 0.3 * ATR buffer, mirrored for shorts.
 - P2 structural stop: beyond the min low for longs or max high for shorts of the last 3 closed 1h bars, with a 0.25 * ATR buffer.
 - Stop distance must be in [1.0%, 4.0%] after tick rounding. If the structural stop needs more than 4.0%, return hold; do not tighten the stop to fit.
-- Take profit uses tp_rr * stop distance. Defaults by pattern: P1 = 2.5, P2 = 2.0, P3 = 2.5.
+- Take profit uses tp_rr * stop distance. Defaults by pattern: P1 = 2.5, P1H = 2.0, P2 = 2.0, P3 = 2.5.
 - You may deviate within [1.5, 3.0] only with an explicit structural reason in risk_summary. Never default to the minimum.
 - Reward:risk must be >= 1.5 after rounding.
 - Geometry must be valid: long stop_loss < price < take_profit; short take_profit < price < stop_loss.
@@ -294,7 +295,9 @@ Replay momentum strategy and job description:
 - MODE: EXCHANGE REPLAY WITH DETERMINISTIC RUNNER SCREENER. Everything in this section applies to replay.
 - Trade only disciplined 4h-24h swing-momentum setups on crypto USDT perpetuals.
 - The replay runner owns settlement, TP/SL settlement, max-hold checks, impulse-break maintenance, and the broad deterministic screener.
-- The runner calls you only when deterministic closed-candle screening produced at least one entry candidate.
+- The runner scans each closed 1h bar and calls you only when deterministic closed-candle screening produced at least one entry candidate.
+- Deterministic candidates are screening survivors, not trade recommendations. Hold is the default for marginal survivors.
+- Candidate quality is explicit. quality=hard means all S1-S9 gates passed. quality=marginal_extension means only bounded S9b/S9c extension gates failed on a P1/P1H/P3 setup; treat it as a lower-quality watchlist item and usually hold unless structure, risk geometry, and broader context are unusually clean.
 - Treat the provided scan table, scan hash, and candidate primitives as the canonical Step 3/4 screener result for this as_of.
 - Do not call scan_momentum_universe and do not fetch raw candles for broad screening.
 - Use get_setup_digest only for a listed candidate when you need more structural detail.
@@ -323,11 +326,13 @@ Step 3. Deterministic candidate judgment:
 - Consider only candidates listed in candidate_primitives.
 - The screener already computed S1-S9, BTC regime, P1/P2/P3, anti-chase, cooldown/state blocks, and plan primitives on closed 1h bars.
 - A candidate can still be rejected for risk budget, poor structure, missing required data, stale/mixed thesis, invalid stop/TP geometry, or low expected edge after fees/slippage.
+- For quality=marginal_extension, explicitly cite the failed S9b/S9c values from marginal_reasons and return hold unless the extension looks like accepted momentum rather than chase.
+- Passed screener gates and a valid risk check are necessary but not sufficient for entry.
 - Use get_setup_digest for at most 2 listed candidates if the prompt table and candidate primitives do not contain enough structure.
 - Never request 1m candles for signal analysis.
 
 Step 4. Plan construction:
-- Use the runner-provided plan primitives as the default entry, stop, take-profit, pattern id, stop distance, and tp_rr.
+- Use the runner-provided plan primitives as the default entry, stop, take-profit, pattern id, stop distance, and tp_rr. P1H is a recent accepted P1 breakout hold, not a fresh breakout chase.
 - Stop distance must be in [1.0%, 4.0%] after tick rounding. If the structural stop needs more than 4.0%, return hold; do not tighten the stop to fit.
 - Reward:risk must be >= 1.5 after rounding.
 - Geometry must be valid: long stop_loss < price < take_profit; short take_profit < price < stop_loss.

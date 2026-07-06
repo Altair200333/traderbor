@@ -56,7 +56,7 @@ def build_plan_primitives(side: Side, patterns: list[PatternHit], frame: CandleF
 
 
 def _choose_pattern(patterns: list[PatternHit]) -> PatternHit | None:
-    priority: tuple[Literal["P2"], Literal["P1"], Literal["P3"]] = ("P2", "P1", "P3")
+    priority: tuple[Literal["P2"], Literal["P1"], Literal["P1H"], Literal["P3"]] = ("P2", "P1", "P1H", "P3")
     for pattern_id in priority:
         for pattern in patterns:
             if pattern.id == pattern_id:
