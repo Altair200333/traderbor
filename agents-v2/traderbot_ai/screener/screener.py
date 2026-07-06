@@ -9,10 +9,11 @@ from pydantic import BaseModel, Field
 from traderbot_ai.screener.config import ScreenerConfig, config_hash
 from traderbot_ai.screener.data import DataIssue, load_closed, validate_frame
 from traderbot_ai.screener.gates import GateResult, evaluate_signal_gates, failed_gate_names, gates_pass, scan_global_blocks, state_blocks
-from traderbot_ai.screener.indicators import atr_wilder, ema, roc, rolling_median_previous, rsi_wilder
+from traderbot_ai.screener.indicators import atr_wilder, ema, range_expansion_last, roc, rolling_median_previous, rsi_wilder, zscore_last
 from traderbot_ai.screener.market import DEFAULT_CACHE_PATH, INTERVAL_MS, normalize_symbol, parse_time_ms
 from traderbot_ai.screener.patterns import PatternHit, detect_patterns, patterns_for_side
 from traderbot_ai.screener.plan import PlanPrimitives, build_plan_primitives
+from traderbot_ai.screener.score import score_candidate
 from traderbot_ai.screener.state import TradingState, candidate_cooldown_entry
 
 
@@ -47,6 +48,7 @@ class SymbolRow(BaseModel):
     cooldown_source_quality: CandidateQuality | None = None
     candidate: CandidateSide | None = None
     candidate_quality: CandidateQuality | None = None
+    candidate_score: float | None = None
     marginal_reasons: list[str] = Field(default_factory=list)
     marginal_score: float | None = None
     failed_gates: list[str] = Field(default_factory=list)
@@ -91,7 +93,7 @@ def scan(
     raw_rows: dict[str, SymbolRow] = {}
     btc_roc = None
     data_warnings = []
-    global_blocks: list[str] = scan_global_blocks(state, cfg)
+    global_blocks: list[str] = scan_global_blocks(state, cfg, parsed_as_of)
     for symbol in scan_symbols:
         row = _scan_symbol(symbol, parsed_as_of, cfg, state, cache, funding or {}, btc_roc_4h=None)
         raw_rows[symbol] = row
@@ -107,6 +109,8 @@ def scan(
         if row.data_issue:
             data_warnings.append(f"{row.symbol}:{row.data_issue.get('reason')}")
     _apply_marginal_candidate_cap(rows, cfg)
+    _score_candidates(rows, cfg)
+    _apply_candidate_rank_cap(rows, cfg)
     candidates = [row.symbol for row in rows if row.candidate in {"long", "short"}]
     return ScanResult(
         as_of_ms=parsed_as_of,
@@ -135,35 +139,35 @@ def get_setup_digest(symbol: str, side: CandidateSide, as_of_ms: int | str | flo
             "as_of_ms": result.as_of_ms,
             "symbol": row.symbol,
             "side": side,
-            "row": row.model_dump(mode="json"),
+            "row": agent_row_view(row),
             "error": issue.reason,
             "data_issue": {"reason": issue.reason, **issue.detail},
         }
-    bars = []
-    for index in range(max(0, frame.length - cfg.setup_digest_bars), frame.length):
-        bars.append(
-            {
-                "i": index - (frame.length - 1),
-                "o": frame.open[index],
-                "h": frame.high[index],
-                "l": frame.low[index],
-                "c": frame.close[index],
-                "v": frame.volume[index],
-            }
-        )
+    t = frame.length - 1
+    close = frame.close[t]
+    atr_value = atr_wilder(frame.high, frame.low, frame.close, cfg.atr_period)[t]
+    support_1h, resistance_1h = _support_resistance_levels(frame, close, atr_value, "1h")
+    frame_4h = _load_optional_frame(cache, row.symbol, INTERVAL_MS["4h"], parsed_as_of, cfg.min_4h_bars)
+    if frame_4h is None:
+        support_4h: list[dict[str, Any]] = []
+        resistance_4h: list[dict[str, Any]] = []
+    else:
+        atr_4h_series = atr_wilder(frame_4h.high, frame_4h.low, frame_4h.close, cfg.atr_period)
+        support_4h, resistance_4h = _support_resistance_levels(frame_4h, close, atr_4h_series[-1], "4h")
+    support_levels = _nearest_levels([*support_1h, *support_4h], close, is_support=True)
+    resistance_levels = _nearest_levels([*resistance_1h, *resistance_4h], close, is_support=False)
+    plan = row.plan if row.candidate == side else None
+    trigger_age_bars = plan.trigger_age_bars if plan is not None else None
     return {
         "ok": row.status == "ok",
         "as_of_ms": result.as_of_ms,
         "symbol": row.symbol,
         "side": side,
-        "row": row.model_dump(mode="json"),
-        "recent_1h_csv": _bars_csv(bars),
-        "range_20_high": _previous_window_max(frame.high, cfg.p1_lookback),
-        "range_20_low": _previous_window_min(frame.low, cfg.p1_lookback),
-        "range_48h_high": _previous_window_max(frame.high, cfg.p3_range_bars),
-        "range_48h_low": _previous_window_min(frame.low, cfg.p3_range_bars),
-        "last_3_high": _tail_max(frame.high, cfg.p2_pullback_bars),
-        "last_3_low": _tail_min(frame.low, cfg.p2_pullback_bars),
+        "row": agent_row_view(row),
+        "support_levels": support_levels,
+        "resistance_levels": resistance_levels,
+        "trigger_age_bars": trigger_age_bars,
+        "retest_seen": _retest_seen(frame, side, plan.boundary_price if plan is not None else None, atr_value, trigger_age_bars),
     }
 
 
@@ -194,6 +198,8 @@ def _scan_symbol(symbol: str, as_of_ms: int, cfg: ScreenerConfig, state: Trading
     vol_ratio = None if current_vol_base in (None, 0.0) else frame.volume[t] / current_vol_base
     atr_pct = None if atr_value is None or close == 0 else atr_value / close
     ema20_ext = None if atr_value in (None, 0.0) or ema20_value is None else (close - ema20_value) / atr_value
+    range_expansion = range_expansion_last(frame.high, frame.low, cfg.s10_lookback_bars)
+    price_zscore = zscore_last(closes, cfg.s11_zscore_window)
     all_patterns = detect_patterns(frame, ema20_series, ema50_series, atr_series, cfg)
     side_rows: dict[str, tuple[dict[str, GateResult], list[PatternHit], PlanPrimitives | None, CandidateQuality | None, list[str], float | None]] = {}
     for side in ("long", "short"):
@@ -214,14 +220,16 @@ def _scan_symbol(symbol: str, as_of_ms: int, cfg: ScreenerConfig, state: Trading
             funding=funding.get(normalized),
             patterns=side_patterns,
             cfg=cfg,
+            range_expansion=range_expansion,
+            zscore=price_zscore,
         )
         hard_pass = gates_pass(gates)
-        plan = build_plan_primitives(side, side_patterns, frame, atr_value, cfg) if atr_value is not None and (hard_pass or _is_marginal_extension(gates, cfg)) else None
+        plan = build_plan_primitives(side, side_patterns, frame, atr_value, cfg) if atr_value is not None and (hard_pass or _is_marginal_extension(side, gates, cfg)) else None
         quality: CandidateQuality | None = "hard" if hard_pass and plan is not None else None
         marginal_reasons: list[str] = []
         marginal_score = None
         if quality is None and plan is not None:
-                marginal_reasons = _marginal_extension_reasons(gates, cfg, plan)
+                marginal_reasons = _marginal_extension_reasons(side, gates, cfg, plan)
                 if marginal_reasons:
                     quality = "marginal_extension"
                     marginal_score = _marginal_extension_score(gates, cfg)
@@ -315,8 +323,8 @@ def _least_failed_side(side_rows: dict[str, tuple[dict[str, GateResult], list[Pa
     return "long" if long_failures <= short_failures else "short"
 
 
-def _is_marginal_extension(gates: dict[str, GateResult], cfg: ScreenerConfig) -> bool:
-    if not cfg.marginal_extension_enabled:
+def _is_marginal_extension(side: CandidateSide, gates: dict[str, GateResult], cfg: ScreenerConfig) -> bool:
+    if not cfg.marginal_extension_enabled or side not in cfg.marginal_extension_sides:
         return False
     failed = failed_gate_names(gates)
     if not failed or not set(failed).issubset({"S9b", "S9c"}):
@@ -336,8 +344,8 @@ def _is_marginal_extension(gates: dict[str, GateResult], cfg: ScreenerConfig) ->
     return True
 
 
-def _marginal_extension_reasons(gates: dict[str, GateResult], cfg: ScreenerConfig, plan: PlanPrimitives | None) -> list[str]:
-    if not _is_marginal_extension(gates, cfg):
+def _marginal_extension_reasons(side: CandidateSide, gates: dict[str, GateResult], cfg: ScreenerConfig, plan: PlanPrimitives | None) -> list[str]:
+    if not _is_marginal_extension(side, gates, cfg):
         return []
     if plan is None or plan.pattern_used not in set(cfg.marginal_extension_patterns):
         return []
@@ -391,6 +399,42 @@ def _apply_marginal_candidate_cap(rows: list[SymbolRow], cfg: ScreenerConfig) ->
         row.plan = None
 
 
+def _score_candidates(rows: list[SymbolRow], cfg: ScreenerConfig) -> None:
+    for row in rows:
+        if row.candidate not in {"long", "short"}:
+            continue
+        details = row.gate_details_long if row.candidate == "long" else row.gate_details_short
+        row.candidate_score = score_candidate(details, row.candidate_quality, cfg)
+
+
+def _apply_candidate_rank_cap(rows: list[SymbolRow], cfg: ScreenerConfig) -> None:
+    cap = int(cfg.max_candidates_per_scan)
+    candidate_rows = [row for row in rows if row.candidate in {"long", "short"}]
+    if cap < 0 or len(candidate_rows) <= cap:
+        return
+    ranked = sorted(candidate_rows, key=lambda row: (-(row.candidate_score or 0.0), row.symbol, row.candidate or ""))
+    allowed = {id(row) for row in ranked[:cap]}
+    for row in candidate_rows:
+        if id(row) in allowed:
+            continue
+        row.blocked_by = [*row.blocked_by, "candidate_rank_cap"]
+        row.candidate = None
+        row.candidate_quality = None
+        row.marginal_reasons = []
+        row.marginal_score = None
+        row.plan = None
+
+
+def agent_row_view(row: SymbolRow) -> dict[str, Any]:
+    """Row dump for agent-visible surfaces: scanner facts only, no reference plan or internal scores."""
+    data = row.model_dump(mode="json")
+    data.pop("plan", None)
+    data.pop("candidate_score", None)
+    data.pop("marginal_score", None)
+    data.pop("signal_marginal_score_before_state", None)
+    return data
+
+
 def _split_symbols(symbols: list[str] | str) -> list[str]:
     if isinstance(symbols, str):
         values = symbols.split(",")
@@ -399,32 +443,103 @@ def _split_symbols(symbols: list[str] | str) -> list[str]:
     return [normalize_symbol(str(symbol)) for symbol in values if str(symbol).strip()]
 
 
-def _bars_csv(bars: list[dict[str, Any]]) -> str:
-    lines = ["i,o,h,l,c,v"]
-    for bar in bars:
-        lines.append(f"{bar['i']},{bar['o']:.8g},{bar['h']:.8g},{bar['l']:.8g},{bar['c']:.8g},{bar['v']:.8g}")
-    return "\n".join(lines)
-
-
-def _previous_window_max(values: list[float], window: int) -> float | None:
-    if len(values) < window + 1:
+def _load_optional_frame(cache_path: Path, symbol: str, interval_ms: int, as_of_ms: int, limit: int) -> CandleFrame | None:
+    try:
+        frame = load_closed(cache_path, symbol, interval_ms, as_of_ms, limit)
+    except Exception:
         return None
-    return max(values[-window - 1 : -1])
-
-
-def _previous_window_min(values: list[float], window: int) -> float | None:
-    if len(values) < window + 1:
+    if validate_frame(frame, as_of_ms, limit) is not None:
         return None
-    return min(values[-window - 1 : -1])
+    return frame
 
 
-def _tail_max(values: list[float], window: int) -> float | None:
-    if len(values) < window:
+def _support_resistance_levels(frame: CandleFrame, close: float, atr_value: float | None, timeframe: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    tolerance = _level_tolerance(close, atr_value)
+    pivot_lows: list[tuple[float, int]] = []
+    pivot_highs: list[tuple[float, int]] = []
+    left = 2
+    right = 2
+    for index in range(left, frame.length - right):
+        low = frame.low[index]
+        high = frame.high[index]
+        if low <= min(frame.low[index - left : index] + frame.low[index + 1 : index + right + 1]):
+            pivot_lows.append((low, index))
+        if high >= max(frame.high[index - left : index] + frame.high[index + 1 : index + right + 1]):
+            pivot_highs.append((high, index))
+    supports = _cluster_price_levels(pivot_lows, frame.length, close, tolerance, timeframe, is_support=True)
+    resistances = _cluster_price_levels(pivot_highs, frame.length, close, tolerance, timeframe, is_support=False)
+    return supports, resistances
+
+
+def _level_tolerance(close: float, atr_value: float | None) -> float:
+    pct_tolerance = abs(close) * 0.002
+    if atr_value is None:
+        return pct_tolerance
+    return max(pct_tolerance, abs(atr_value) * 0.15)
+
+
+def _cluster_price_levels(
+    pivots: list[tuple[float, int]],
+    frame_length: int,
+    close: float,
+    tolerance: float,
+    timeframe: str,
+    *,
+    is_support: bool,
+) -> list[dict[str, Any]]:
+    if not pivots:
+        return []
+    clusters: list[dict[str, Any]] = []
+    for price, index in sorted(pivots, key=lambda item: item[0]):
+        for cluster in clusters:
+            if abs(price - float(cluster["price"])) <= tolerance:
+                touches = int(cluster["touches"]) + 1
+                cluster["price"] = (float(cluster["price"]) * int(cluster["touches"]) + price) / touches
+                cluster["touches"] = touches
+                cluster["last_index"] = max(int(cluster["last_index"]), index)
+                break
+        else:
+            clusters.append({"price": price, "touches": 1, "last_index": index})
+    levels = []
+    for cluster in clusters:
+        price = float(cluster["price"])
+        if is_support and price > close:
+            continue
+        if not is_support and price < close:
+            continue
+        levels.append(
+            {
+                "price": price,
+                "touches": int(cluster["touches"]),
+                "age_bars": frame_length - 1 - int(cluster["last_index"]),
+                "distance_pct": None if close == 0 else abs(close - price) / abs(close),
+                "timeframe": timeframe,
+            }
+        )
+    return _nearest_levels(levels, close, is_support=is_support)
+
+
+def _nearest_levels(levels: list[dict[str, Any]], close: float, *, is_support: bool) -> list[dict[str, Any]]:
+    filtered = [level for level in levels if (float(level["price"]) <= close if is_support else float(level["price"]) >= close)]
+    return sorted(filtered, key=lambda level: (float(level["distance_pct"] or 0.0), -int(level["touches"]), int(level["age_bars"])))[:5]
+
+
+def _retest_seen(frame: CandleFrame, side: CandidateSide, boundary: float | None, atr_value: float | None, trigger_age_bars: int | None) -> bool | None:
+    if boundary is None or atr_value is None:
         return None
-    return max(values[-window:])
-
-
-def _tail_min(values: list[float], window: int) -> float | None:
-    if len(values) < window:
+    if trigger_age_bars is None:
         return None
-    return min(values[-window:])
+    if trigger_age_bars <= 0:
+        return False
+    tolerance = 0.25 * abs(atr_value)
+    t = frame.length - 1
+    trigger_index = t - int(trigger_age_bars)
+    start = trigger_index + 1
+    if start > t:
+        return False
+    for index in range(start, t + 1):
+        if side == "long" and frame.low[index] <= boundary + tolerance and frame.close[index] >= boundary:
+            return True
+        if side == "short" and frame.high[index] >= boundary - tolerance and frame.close[index] <= boundary:
+            return True
+    return False

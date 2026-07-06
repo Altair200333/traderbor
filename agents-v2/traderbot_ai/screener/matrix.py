@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 from traderbot_ai.screener.config import ScreenerConfig
@@ -128,6 +129,7 @@ def _candidate_item(row: SymbolRow, as_of_ms: int, cache_path: Path, forward_hor
         "failed_gates": row.failed_gates,
         "marginal_reasons": row.marginal_reasons,
         "marginal_score": row.marginal_score,
+        "score": row.candidate_score,
         "pattern": row.plan.pattern_used if row.plan else None,
         "close": row.close,
         "roc_4h": row.roc_4h,
@@ -293,6 +295,249 @@ def _forward_move_label(cache_path: Path, symbol: str, side: str, as_of_ms: int,
     }
 
 
+STOP_SWEEP_MULTIPLIERS = (0.5, 0.75, 1.0, 1.5, 2.0)
+_OUTCOME_KEYS = ("tp", "sl", "ambiguous", "none", "missing_1m", "invalid_plan", "missing")
+
+
+def candidate_outcome_report(summary: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Per-tag outcome aggregation over scan_window_summary candidates (gate-lab layer 2)."""
+    counters: dict[str, Counter[str]] = defaultdict(Counter)
+    exit_times: dict[str, list[int]] = defaultdict(list)
+    for item in summary.get("candidates") or []:
+        forward = item.get("forward") if isinstance(item.get("forward"), dict) else {}
+        outcome = str(forward.get("tp_sl_first") or "missing")
+        tags = [
+            "total",
+            f"quality:{item.get('quality')}",
+            f"pattern:{item.get('pattern')}",
+            f"side:{item.get('side')}",
+            f"gates:{'+'.join(item.get('failed_gates') or []) or 'none'}",
+        ]
+        first_time_ms = forward.get("first_time_ms")
+        for tag in tags:
+            counters[tag][outcome] += 1
+            if first_time_ms is not None:
+                exit_times[tag].append(int(first_time_ms) - int(item["as_of_ms"]))
+    report: dict[str, dict[str, Any]] = {}
+    for tag, counter in sorted(counters.items()):
+        resolved = counter.get("tp", 0) + counter.get("sl", 0)
+        report[tag] = {
+            "n": sum(counter.values()),
+            **{key: counter.get(key, 0) for key in _OUTCOME_KEYS if counter.get(key, 0)},
+            "tp_rate_resolved": None if resolved == 0 else counter.get("tp", 0) / resolved,
+            "median_time_to_exit_min": None if not exit_times.get(tag) else median(exit_times[tag]) / 60_000.0,
+        }
+    return report
+
+
+def stop_sweep(
+    summary: dict[str, Any],
+    cache_path: str | Path,
+    multipliers: tuple[float, ...] = STOP_SWEEP_MULTIPLIERS,
+    horizon_hours: int = 24,
+    include_cksp: bool = True,
+) -> dict[str, dict[str, Any]]:
+    """Relabel every candidate at scaled stop distances (RR held constant) plus the CKSP stop engine (gate-lab layer 3)."""
+    cache = Path(cache_path)
+    counters: dict[str, Counter[str]] = defaultdict(Counter)
+    payoffs: dict[str, list[float]] = defaultdict(list)
+    exit_times: dict[str, list[int]] = defaultdict(list)
+    for item in summary.get("candidates") or []:
+        plan = item.get("plan") if isinstance(item.get("plan"), dict) else None
+        side = item.get("side")
+        if plan is None or side not in {"long", "short"}:
+            continue
+        entry = float(plan.get("ref_entry") or 0.0)
+        d_final = float(plan.get("d_final") or 0.0)
+        tp_rr = float(plan.get("tp_rr_default") or 0.0)
+        engines: list[tuple[str, float | None]] = [(f"{multiplier:g}x_d_final", multiplier * d_final) for multiplier in multipliers]
+        if include_cksp:
+            engines.append(("cksp", None if plan.get("d_cksp") is None else float(plan["d_cksp"])))
+        for label, stop_distance in engines:
+            if stop_distance is None or stop_distance <= 0:
+                counters[label]["no_stop"] += 1
+                continue
+            forward = _forward_label(cache, str(item["symbol"]), str(side), int(item["as_of_ms"]), entry, stop_distance, tp_rr, horizon_hours)
+            outcome = str(forward.get("tp_sl_first") or "missing")
+            counters[label][outcome] += 1
+            if outcome == "tp":
+                payoffs[label].append(tp_rr)
+            elif outcome == "sl":
+                payoffs[label].append(-1.0)
+            if forward.get("first_time_ms") is not None:
+                exit_times[label].append(int(forward["first_time_ms"]) - int(item["as_of_ms"]))
+    report: dict[str, dict[str, Any]] = {}
+    for label, counter in sorted(counters.items()):
+        resolved = counter.get("tp", 0) + counter.get("sl", 0)
+        report[label] = {
+            "n": sum(counter.values()),
+            **{key: counter.get(key, 0) for key in (*_OUTCOME_KEYS, "no_stop") if counter.get(key, 0)},
+            "tp_rate_resolved": None if resolved == 0 else counter.get("tp", 0) / resolved,
+            "mean_payoff_r": None if not payoffs.get(label) else sum(payoffs[label]) / len(payoffs[label]),
+            "median_time_to_exit_min": None if not exit_times.get(label) else median(exit_times[label]) / 60_000.0,
+        }
+    return report
+
+
+RETEST_PULLBACKS = (0.25, 0.4)
+RETEST_TTLS_MIN = (60, 120, 240)
+RETEST_BUCKET_SYMBOLS = ("ZECUSDT", "PEPEUSDT")
+
+
+def retest_sweep(
+    summary: dict[str, Any],
+    cache_path: str | Path,
+    pullbacks: tuple[float, ...] = RETEST_PULLBACKS,
+    ttls_min: tuple[int, ...] = RETEST_TTLS_MIN,
+    horizon_hours: int = 24,
+) -> dict[str, Any]:
+    """Retest-limit entry sweep: limit at entry -/+ p*d_final with a TTL; unfilled -> trade skipped (gate-lab layer 4).
+
+    Accounting follows the sub-hour execution study (docs/notes/2026-07-07/scanner-improvements-data-feedback.md):
+    R stays in units of the original d_final; a fill improves entry by +p (tp -> tp_rr + p, sl/ambiguous -> -1 + p,
+    unresolved -> mark-to-horizon + p); a TP whose limit fills only at/after the TP touch counts as a skip (late_fill).
+    """
+    rows: list[dict[str, Any]] = []
+    skipped_no_data = 0
+    for item in summary.get("candidates") or []:
+        plan = item.get("plan") if isinstance(item.get("plan"), dict) else None
+        side = item.get("side")
+        if plan is None or side not in {"long", "short"}:
+            continue
+        walk = _retest_walk(
+            Path(cache_path),
+            str(item["symbol"]),
+            str(side),
+            int(item["as_of_ms"]),
+            float(plan.get("ref_entry") or 0.0),
+            float(plan.get("d_final") or 0.0),
+            float(plan.get("tp_rr_default") or 0.0),
+            pullbacks,
+            horizon_hours,
+        )
+        if walk is None:
+            skipped_no_data += 1
+            continue
+        walk["symbol"] = str(item["symbol"])
+        walk["month"] = _iso(int(item["as_of_ms"]))[:7]
+        rows.append(walk)
+
+    cells = [(pullback, ttl, f"p{pullback:g}_ttl{ttl}m") for pullback in pullbacks for ttl in ttls_min]
+    report: dict[str, Any] = {
+        "n": len(rows),
+        "skipped_no_data": skipped_no_data,
+        "base_total_r": round(sum(row["base_r"] for row in rows), 4),
+        "cells": {label: _retest_cell(rows, pullback, ttl) for pullback, ttl, label in cells},
+        "splits": {},
+    }
+    for month in sorted({row["month"] for row in rows}):
+        subset = [row for row in rows if row["month"] == month]
+        report["splits"][f"month:{month}"] = _retest_split(subset, cells)
+    for bucket, in_bucket in (("concentrated", True), ("rest", False)):
+        subset = [row for row in rows if (row["symbol"] in RETEST_BUCKET_SYMBOLS) is in_bucket]
+        report["splits"][f"bucket:{bucket}"] = _retest_split(subset, cells)
+    return report
+
+
+def _retest_split(rows: list[dict[str, Any]], cells: list[tuple[float, int, str]]) -> dict[str, Any]:
+    return {
+        "n": len(rows),
+        "base_total_r": round(sum(row["base_r"] for row in rows), 4),
+        "cells": {label: _retest_cell(rows, pullback, ttl) for pullback, ttl, label in cells},
+    }
+
+
+def _retest_cell(rows: list[dict[str, Any]], pullback: float, ttl_min: int) -> dict[str, Any]:
+    total = 0.0
+    filled = tp_caught = tp_missed = late_fill = sl_avoided = none_skipped = 0
+    for row in rows:
+        fill_min = row["t_fill_min"].get(pullback)
+        if fill_min is None or fill_min > ttl_min:
+            if row["outcome"] == "tp":
+                tp_missed += 1
+            elif row["outcome"] in {"sl", "ambiguous"}:
+                sl_avoided += 1
+            else:
+                none_skipped += 1
+            continue
+        if row["outcome"] == "tp":
+            if row["t_tp_min"] is not None and fill_min < row["t_tp_min"]:
+                total += row["tp_rr"] + pullback
+                tp_caught += 1
+                filled += 1
+            else:
+                late_fill += 1
+        elif row["outcome"] in {"sl", "ambiguous"}:
+            total += -1.0 + pullback
+            filled += 1
+        else:
+            total += row["base_r"] + pullback
+            filled += 1
+    base_total = sum(row["base_r"] for row in rows)
+    return {
+        "filled": filled,
+        "tp_caught": tp_caught,
+        "tp_missed": tp_missed,
+        "late_fill": late_fill,
+        "sl_avoided": sl_avoided,
+        "none_skipped": none_skipped,
+        "total_r": round(total, 4),
+        "delta_r": round(total - base_total, 4),
+    }
+
+
+def _retest_walk(
+    cache_path: Path,
+    symbol: str,
+    side: str,
+    as_of_ms: int,
+    entry: float,
+    d_final: float,
+    tp_rr: float,
+    pullbacks: tuple[float, ...],
+    horizon_hours: int,
+) -> dict[str, Any] | None:
+    if entry <= 0 or d_final <= 0 or tp_rr <= 0:
+        return None
+    sign = 1.0 if side == "long" else -1.0
+    stop = entry * (1.0 - sign * d_final)
+    take = entry * (1.0 + sign * d_final * tp_rr)
+    horizon_min = int(horizon_hours) * 60
+    cache = LocalMarketCache(cache_path)
+    candles = cache.get_candles(symbol, "1m", start_ms=as_of_ms, end_ms=as_of_ms + horizon_min * 60_000)
+    if not candles or len(candles) < horizon_min * 0.9:
+        return None
+    t_sl: int | None = None
+    t_tp: int | None = None
+    t_fill: dict[float, int | None] = {pullback: None for pullback in pullbacks}
+    close_last = entry
+    for index, candle in enumerate(candles):
+        minute = index + 1
+        adverse = (entry - candle.low) / entry if side == "long" else (candle.high - entry) / entry
+        hit_stop = candle.low <= stop if side == "long" else candle.high >= stop
+        hit_take = candle.high >= take if side == "long" else candle.low <= take
+        if t_sl is None and hit_stop:
+            t_sl = minute
+        if t_tp is None and hit_take:
+            t_tp = minute
+        for pullback in pullbacks:
+            if t_fill[pullback] is None and adverse >= pullback * d_final:
+                t_fill[pullback] = minute
+        close_last = candle.close
+    if t_tp is not None and (t_sl is None or t_tp < t_sl):
+        outcome = "tp"
+    elif t_sl is not None and (t_tp is None or t_sl < t_tp):
+        outcome = "sl"
+    elif t_sl is not None:
+        outcome = "ambiguous"
+    else:
+        outcome = "none"
+    base_r = {"tp": tp_rr, "sl": -1.0, "ambiguous": -1.0}.get(outcome)
+    if base_r is None:
+        base_r = sign * (close_last - entry) / (entry * d_final)
+    return {"outcome": outcome, "base_r": base_r, "t_tp_min": t_tp, "t_sl_min": t_sl, "t_fill_min": t_fill, "tp_rr": tp_rr}
+
+
 def _best_side(row: SymbolRow) -> str:
     long_failures = sum(1 for value in row.gates_long.values() if value is False)
     short_failures = sum(1 for value in row.gates_short.values() if value is False)
@@ -334,18 +579,28 @@ def main() -> None:
     parser.add_argument("--no-forward", action="store_true")
     parser.add_argument("--forward-horizon-hours", type=int, default=24)
     parser.add_argument("--near-miss-limit", type=int, default=50)
+    parser.add_argument("--report", action="store_true", help="append per-tag outcome report and stop-distance sweep (gate-lab)")
+    parser.add_argument("--cfg-json", help="JSON object of ScreenerConfig overrides for threshold experiments")
     args = parser.parse_args()
 
+    cfg = ScreenerConfig(**json.loads(args.cfg_json)) if args.cfg_json else None
     summary = scan_window_summary(
         args.symbols,
         start_ms=args.start,
         end_ms=args.end,
         step_interval=args.step_interval,
         cache_path=args.cache_path,
+        cfg=cfg,
         include_forward=not args.no_forward,
         forward_horizon_hours=args.forward_horizon_hours,
         near_miss_limit=args.near_miss_limit,
     )
+    if args.report:
+        cache = Path(args.cache_path) if args.cache_path else DEFAULT_CACHE_PATH
+        summary["outcome_report"] = candidate_outcome_report(summary)
+        if not args.no_forward:
+            summary["stop_sweep"] = stop_sweep(summary, cache, horizon_hours=args.forward_horizon_hours)
+            summary["retest_sweep"] = retest_sweep(summary, cache, horizon_hours=args.forward_horizon_hours)
     payload = json.dumps(summary, ensure_ascii=True, indent=2)
     if args.output:
         target = Path(args.output)

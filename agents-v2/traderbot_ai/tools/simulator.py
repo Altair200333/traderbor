@@ -14,6 +14,7 @@ from traderbot_ai.simulator.execution import ExecutionEngine, Order
 from traderbot_ai.simulator.market_cache import DEFAULT_CACHE_PATH, LocalMarketCache, candle_freshness
 from traderbot_ai.simulator.portfolio import SimulatedPortfolio
 from traderbot_ai.tools.market import _summarize_candles, normalize_symbol, parse_time_ms
+from traderbot_ai.tools.replay_helpers import deterministic_candle_deep_dive_request
 
 
 def _ok(**data) -> dict:
@@ -343,6 +344,23 @@ def get_cached_candles(
     return get_cached_candles_impl(symbol, interval, as_of, lookback, start_time, end_time)
 
 
+def get_candles_impl(
+    symbol: str,
+    interval: str = "1m",
+    as_of: str | None = None,
+    limit: int = 120,
+) -> dict:
+    """Get closed candles from local cache. Compatible replacement for market.get_candles."""
+    preflight = deterministic_candle_deep_dive_request(symbol, interval, as_of, limit, None, None)
+    if preflight is not None and preflight.get("ok") is not True:
+        return preflight
+    if preflight is not None:
+        symbol = str(preflight["symbol"])
+        interval = str(preflight["interval"])
+        limit = int(preflight["limit"])
+    return get_cached_candles_impl(symbol=symbol, interval=interval, as_of=as_of, lookback=limit)
+
+
 @function_tool
 def get_candles(
     symbol: str,
@@ -351,7 +369,7 @@ def get_candles(
     limit: int = 120,
 ) -> dict:
     """Get closed candles from local cache. Compatible replacement for market.get_candles."""
-    return get_cached_candles_impl(symbol=symbol, interval=interval, as_of=as_of, lookback=limit)
+    return get_candles_impl(symbol=symbol, interval=interval, as_of=as_of, limit=limit)
 
 
 @function_tool

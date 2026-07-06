@@ -1083,5 +1083,101 @@ class SimulatedExchangeTests(unittest.TestCase):
             self.assertEqual([event["type"] for event in events], ["exchange_reset", "place_order", "cancel_order"])
 
 
+class LinearLimitExpiryTests(unittest.TestCase):
+    """TTL expiry for pending linear limit orders (limit_retest entry policy plumbing)."""
+
+    def _exchange(self, tmp: str, candles: list[Candle]) -> SimulatedExchange:
+        cache = LocalMarketCache(Path(tmp) / "market.sqlite3")
+        cache.upsert_candles(candles)
+        exchange = SimulatedExchange(Path(tmp) / "exchange.json", Path(tmp) / "events.jsonl", cache=cache)
+        exchange.reset({"USDT": 1000.0}, as_of=BASE_MS)
+        return exchange
+
+    def _place_retest_limit(self, exchange: SimulatedExchange, expires_min: int = 10) -> dict:
+        return exchange.place_order(
+            "linear",
+            SYMBOL,
+            "Buy",
+            "Limit",
+            qty=1.0,
+            price=99.5,
+            takeProfit=104.0,
+            stopLoss=98.0,
+            as_of=BASE_MS,
+            expiresAtMs=BASE_MS + expires_min * 60_000,
+            entryPolicy="limit_retest",
+            entryRefPrice=100.0,
+        )
+
+    def test_limit_fills_before_expiry_and_opens_position(self) -> None:
+        candles = [candle(SYMBOL, BASE_MS, 100.0, 100.2, 99.9, 100.0), candle(SYMBOL, BASE_MS + 60_000, 100.0, 100.1, 99.4, 100.0)]
+        candles += [candle(SYMBOL, BASE_MS + k * 60_000, 100.0, 100.2, 99.9, 100.0) for k in range(2, 8)]
+        with tempfile.TemporaryDirectory() as tmp:
+            exchange = self._exchange(tmp, candles)
+            placed = self._place_retest_limit(exchange)
+            self.assertEqual(placed["order"]["status"], "New")
+            self.assertEqual(placed["order"]["entry_policy"], "limit_retest")
+            self.assertEqual(placed["order"]["entry_ref_price"], 100.0)
+
+            settled = exchange.settle(as_of=BASE_MS + 7 * 60_000)
+
+            self.assertEqual(len(settled["filled_orders"]), 1)
+            self.assertEqual(settled["expired_orders"], [])
+            fill = settled["filled_orders"][0]
+            self.assertEqual(fill["fill_price"], 99.5)
+            position = settled["state"]["positions"][0]
+            self.assertEqual(position["entry_price"], 99.5)
+            self.assertEqual(position["takeProfit"], 104.0)
+            self.assertEqual(position["stopLoss"], 98.0)
+
+    def test_limit_expires_when_no_pullback_and_releases_margin(self) -> None:
+        candles = [candle(SYMBOL, BASE_MS + k * 60_000, 100.0, 100.2, 99.9, 100.0) for k in range(0, 16)]
+        with tempfile.TemporaryDirectory() as tmp:
+            exchange = self._exchange(tmp, candles)
+            self._place_retest_limit(exchange, expires_min=10)
+            locked_after_place = exchange.load()["balances"]["USDT"]["locked"]
+            self.assertAlmostEqual(locked_after_place, 99.5)
+
+            settled = exchange.settle(as_of=BASE_MS + 15 * 60_000)
+
+            self.assertEqual(settled["filled_orders"], [])
+            self.assertEqual(len(settled["expired_orders"]), 1)
+            expired = settled["expired_orders"][0]
+            self.assertEqual(expired["status"], "Expired")
+            self.assertEqual(expired["expired_at_ms"], BASE_MS + 10 * 60_000)
+            state = settled["state"]
+            self.assertEqual(state["orders"], [])
+            self.assertEqual(state["positions"], [])
+            self.assertAlmostEqual(state["balances"]["USDT"]["locked"], 0.0)
+            self.assertAlmostEqual(state["balances"]["USDT"]["free"], 1000.0)
+            events = [json.loads(line)["type"] for line in (Path(tmp) / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertIn("order_expired", events)
+
+    def test_touch_after_expiry_does_not_fill(self) -> None:
+        candles = [candle(SYMBOL, BASE_MS + k * 60_000, 100.0, 100.2, 99.9, 100.0) for k in range(0, 12)]
+        candles.append(candle(SYMBOL, BASE_MS + 12 * 60_000, 100.0, 100.1, 99.0, 99.2))
+        candles += [candle(SYMBOL, BASE_MS + k * 60_000, 99.2, 99.4, 99.0, 99.2) for k in range(13, 21)]
+        with tempfile.TemporaryDirectory() as tmp:
+            exchange = self._exchange(tmp, candles)
+            self._place_retest_limit(exchange, expires_min=10)
+
+            settled = exchange.settle(as_of=BASE_MS + 20 * 60_000)
+
+            self.assertEqual(settled["filled_orders"], [])
+            self.assertEqual(len(settled["expired_orders"]), 1)
+            self.assertEqual(settled["state"]["positions"], [])
+
+    def test_expiry_param_is_rejected_for_market_and_spot_orders(self) -> None:
+        candles = [candle(SYMBOL, BASE_MS, 100.0, 100.2, 99.9, 100.0)]
+        with tempfile.TemporaryDirectory() as tmp:
+            exchange = self._exchange(tmp, candles)
+            with self.assertRaisesRegex(ValueError, "linear Limit"):
+                exchange.place_order("linear", SYMBOL, "Buy", "Market", qty=1.0, takeProfit=104.0, stopLoss=98.0, as_of=BASE_MS, expiresAtMs=BASE_MS + 600_000)
+            with self.assertRaisesRegex(ValueError, "linear Limit"):
+                exchange.place_order("spot", SYMBOL, "Buy", "Limit", qty=1.0, price=99.5, as_of=BASE_MS, expiresAtMs=BASE_MS + 600_000)
+            with self.assertRaisesRegex(ValueError, "after as_of"):
+                exchange.place_order("linear", SYMBOL, "Buy", "Limit", qty=1.0, price=99.5, takeProfit=104.0, stopLoss=98.0, as_of=BASE_MS, expiresAtMs=BASE_MS)
+
+
 if __name__ == "__main__":
     unittest.main()

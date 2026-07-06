@@ -52,6 +52,9 @@ class ExchangeReplayConfig:
     events_path: Path | None = None
     replay_path: Path | None = None
     screener_mode: str = "off"
+    entry_policy: str = "next_open"
+    retest_pullback: float = 0.4
+    retest_ttl_min: int = 120
 
 
 def build_exchange_replay_config(
@@ -69,6 +72,9 @@ def build_exchange_replay_config(
     events_path: str | Path | None = None,
     replay_path: str | Path | None = None,
     screener_mode: str = "off",
+    entry_policy: str = "next_open",
+    retest_pullback: float = 0.4,
+    retest_ttl_min: int = 120,
 ) -> ExchangeReplayConfig:
     normalized_symbols = tuple(normalize_symbol(symbol) for symbol in _split_symbols(symbols))
     if not normalized_symbols:
@@ -89,6 +95,16 @@ def build_exchange_replay_config(
         raise ValueError("deterministic screener replay requires decision_interval=1h")
     if screener_mode == "deterministic":
         _validate_deterministic_replay_timing(start_ms, end_ms, decision_interval)
+    if entry_policy not in {"next_open", "limit_retest"}:
+        raise ValueError("entry_policy must be next_open or limit_retest")
+    if entry_policy == "limit_retest" and screener_mode != "deterministic":
+        raise ValueError("limit_retest entry policy requires screener_mode=deterministic")
+    retest_pullback_value = float(retest_pullback)
+    if not (0.0 < retest_pullback_value < 1.0):
+        raise ValueError("retest_pullback must be between 0 and 1")
+    retest_ttl_value = int(retest_ttl_min)
+    if retest_ttl_value < 1:
+        raise ValueError("retest_ttl_min must be at least 1 minute")
     fee_rate_value = float(fee_rate)
     if not math.isfinite(fee_rate_value) or fee_rate_value < 0:
         raise ValueError("fee_rate must be non-negative")
@@ -113,6 +129,9 @@ def build_exchange_replay_config(
         events_path=Path(events_path) if events_path is not None else DATA_DIR / f"{safe_run_id}.exchange.events.jsonl",
         replay_path=Path(replay_path) if replay_path is not None else DATA_DIR / f"{safe_run_id}.replay.jsonl",
         screener_mode=screener_mode,
+        entry_policy=entry_policy,
+        retest_pullback=retest_pullback_value,
+        retest_ttl_min=retest_ttl_value,
     )
 
 
@@ -161,6 +180,9 @@ def run_exchange_replay(
             fee_rate=config.fee_rate,
             cache_path=cache.path,
             execution_interval=config.execution_interval,
+            entry_policy=config.entry_policy if config.entry_policy != "next_open" else None,
+            retest_pullback=config.retest_pullback,
+            retest_ttl_min=config.retest_ttl_min,
         ):
             while as_of_ms < config.end_ms:
                 set_simulation_clock_state(as_of_ms)
@@ -211,6 +233,7 @@ def run_exchange_replay(
                     allow_hold_position_closes=config.screener_mode != "deterministic",
                     allowed_entry_candidates=_allowed_entry_candidates(context) if config.screener_mode == "deterministic" else None,
                     strict_entry_events=config.screener_mode == "deterministic",
+                    expected_entry_policy=config.entry_policy,
                 )
                 wallet_after = exchange.wallet_summary(symbols=list(config.symbols), as_of=as_of_ms, mark_interval=config.execution_interval)
                 step = {
@@ -267,6 +290,9 @@ def exchange_tool_environment(
     fee_rate: float | None = None,
     cache_path: str | Path | None = None,
     execution_interval: str | None = None,
+    entry_policy: str | None = None,
+    retest_pullback: float | None = None,
+    retest_ttl_min: int | None = None,
 ) -> Iterator[None]:
     old_backend = os.environ.get("TRADERBOT_EXCHANGE_BACKEND")
     old_state = os.environ.get("TRADERBOT_EXCHANGE_STATE_PATH")
@@ -274,6 +300,9 @@ def exchange_tool_environment(
     old_fee_rate = os.environ.get("TRADERBOT_EXCHANGE_FEE_RATE")
     old_cache = os.environ.get("TRADERBOT_MARKET_CACHE_PATH")
     old_execution_interval = os.environ.get("TRADERBOT_EXCHANGE_EXECUTION_INTERVAL")
+    old_entry_policy = os.environ.get("TRADERBOT_ENTRY_POLICY")
+    old_retest_pullback = os.environ.get("TRADERBOT_RETEST_PULLBACK")
+    old_retest_ttl = os.environ.get("TRADERBOT_RETEST_TTL_MIN")
     if backend is not None:
         os.environ["TRADERBOT_EXCHANGE_BACKEND"] = backend
     else:
@@ -292,6 +321,18 @@ def exchange_tool_environment(
         os.environ["TRADERBOT_EXCHANGE_EXECUTION_INTERVAL"] = execution_interval
     else:
         os.environ.pop("TRADERBOT_EXCHANGE_EXECUTION_INTERVAL", None)
+    if entry_policy is not None:
+        os.environ["TRADERBOT_ENTRY_POLICY"] = entry_policy
+    else:
+        os.environ.pop("TRADERBOT_ENTRY_POLICY", None)
+    if retest_pullback is not None:
+        os.environ["TRADERBOT_RETEST_PULLBACK"] = str(float(retest_pullback))
+    else:
+        os.environ.pop("TRADERBOT_RETEST_PULLBACK", None)
+    if retest_ttl_min is not None:
+        os.environ["TRADERBOT_RETEST_TTL_MIN"] = str(int(retest_ttl_min))
+    else:
+        os.environ.pop("TRADERBOT_RETEST_TTL_MIN", None)
     try:
         yield
     finally:
@@ -301,6 +342,9 @@ def exchange_tool_environment(
         _restore_env("TRADERBOT_EXCHANGE_FEE_RATE", old_fee_rate)
         _restore_env("TRADERBOT_MARKET_CACHE_PATH", old_cache)
         _restore_env("TRADERBOT_EXCHANGE_EXECUTION_INTERVAL", old_execution_interval)
+        _restore_env("TRADERBOT_ENTRY_POLICY", old_entry_policy)
+        _restore_env("TRADERBOT_RETEST_PULLBACK", old_retest_pullback)
+        _restore_env("TRADERBOT_RETEST_TTL_MIN", old_retest_ttl)
 
 
 def _build_deterministic_scan_context(
@@ -336,10 +380,23 @@ def _build_deterministic_scan_context(
             "failed_gates": row.failed_gates,
             "marginal_reasons": row.marginal_reasons,
             "plan": None if row.plan is None else row.plan.model_dump(mode="json"),
+            "score": row.candidate_score,
             "signal_candidate_before_state": row.signal_candidate_before_state,
         }
         for row in result.symbols
         if row.candidate in {"long", "short"}
+    ]
+    # Runner-internal primitives keep the reference plan for logs/validation;
+    # the agent-facing view carries scanner facts only.
+    candidate_view = [
+        {
+            "symbol": item["symbol"],
+            "side": item["side"],
+            "quality": item["quality"],
+            "failed_gates": item["failed_gates"],
+            "marginal_reasons": item["marginal_reasons"],
+        }
+        for item in candidate_primitives
     ]
     return {
         "screener_mode": "deterministic",
@@ -347,7 +404,12 @@ def _build_deterministic_scan_context(
         "scan_artifact_path": artifacts["artifact_path"],
         "scan_hash": artifacts["sha256"],
         "candidate_primitives": candidate_primitives,
+        "candidate_view": candidate_view,
         "screener_candidates": [item["symbol"] for item in candidate_primitives],
+        "max_entry_drift_pct": screener_cfg.max_entry_drift_pct,
+        "entry_policy": config.entry_policy,
+        "retest_pullback": config.retest_pullback,
+        "retest_ttl_min": config.retest_ttl_min,
         "global_blocks": result.global_blocks,
         "data_warnings": result.data_warnings,
     }
@@ -464,11 +526,17 @@ def _allowed_entry_candidates(context: dict[str, Any]) -> set[tuple[str, str]]:
 def _deterministic_candidate_allowlist_env(context: dict[str, Any]) -> Iterator[None]:
     old_mode = os.environ.get("TRADERBOT_SCREENER_MODE")
     old_candidates = os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES")
-    payload = [
-        {"symbol": item.get("symbol"), "side": item.get("side")}
-        for item in context.get("candidate_primitives") or []
-        if isinstance(item, dict) and item.get("side") in {"long", "short"}
-    ]
+    max_drift = context.get("max_entry_drift_pct")
+    payload = []
+    for item in context.get("candidate_primitives") or []:
+        if not (isinstance(item, dict) and item.get("side") in {"long", "short"}):
+            continue
+        entry = {"symbol": item.get("symbol"), "side": item.get("side")}
+        plan = item.get("plan") if isinstance(item.get("plan"), dict) else {}
+        if plan.get("ref_entry") is not None and max_drift is not None:
+            entry["ref_price"] = plan.get("ref_entry")
+            entry["max_drift_pct"] = max_drift
+        payload.append(entry)
     os.environ["TRADERBOT_SCREENER_MODE"] = "deterministic"
     os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"] = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
     try:
@@ -498,6 +566,7 @@ def _validate_decision_exchange_consistency(
     allow_hold_position_closes: bool = True,
     allowed_entry_candidates: set[tuple[str, str]] | None = None,
     strict_entry_events: bool = False,
+    expected_entry_policy: str | None = None,
 ) -> None:
     if not isinstance(decision, dict):
         return
@@ -514,8 +583,8 @@ def _validate_decision_exchange_consistency(
                 raise RuntimeError(f"{final_decision} decision is not in deterministic screener candidates")
         if len(place_order_events) != 1:
             raise RuntimeError(f"{final_decision} decision did not produce a place_order exchange event")
-        if not _place_order_event_matches_decision(place_order_events[0], decision, final_decision):
-            raise RuntimeError(f"{final_decision} decision does not match the place_order exchange event")
+        if not _place_order_event_matches_decision(place_order_events[0], decision, final_decision, expected_entry_policy=expected_entry_policy):
+            raise RuntimeError(f"{final_decision} decision does not match the place_order exchange event (expected entry policy: {expected_entry_policy or 'next_open'})")
         if strict_entry_events:
             disallowed = []
             for event in agent_exchange_events:
@@ -534,14 +603,10 @@ def _validate_decision_exchange_consistency(
             raise RuntimeError(f"hold decision produced disallowed exchange events: {', '.join(disallowed)}")
 
 
-def _place_order_event_matches_decision(event: dict[str, Any], decision: dict[str, Any], final_decision: str) -> bool:
+def _place_order_event_matches_decision(event: dict[str, Any], decision: dict[str, Any], final_decision: str, *, expected_entry_policy: str | None = None) -> bool:
     raw_payload = event.get("payload")
     payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
     if str(payload.get("category", "")).lower() != "linear":
-        return False
-    if str(payload.get("orderType", "")).lower() != "market":
-        return False
-    if str(payload.get("status", "")).lower() != "filled":
         return False
     if not _symbols_match(payload.get("symbol"), decision.get("symbol")):
         return False
@@ -551,20 +616,40 @@ def _place_order_event_matches_decision(event: dict[str, Any], decision: dict[st
     amount = _optional_float(decision.get("amount"))
     if amount is None or amount <= 0:
         return False
-    raw_position = payload.get("position")
-    position: dict[str, Any] = raw_position if isinstance(raw_position, dict) else {}
-    if not position:
+    payload_policy = str(payload.get("entry_policy") or "")
+    if expected_entry_policy == "limit_retest" and payload_policy != "limit_retest":
+        # configured retest entry must not silently fall back to a market fill
         return False
-    if str(position.get("category", "")).lower() != "linear":
-        return False
-    notional = _optional_float(payload.get("notional_usdt"))
-    if notional is None:
-        notional = _optional_float(position.get("notional_usdt"))
-    if notional is None:
+    if payload_policy == "limit_retest":
+        # runner-owned retest entry: the accepted order is a pending limit, no position yet
+        if str(payload.get("orderType", "")).lower() != "limit":
+            return False
+        if str(payload.get("status", "")).lower() != "new":
+            return False
+        if payload.get("expires_at_ms") is None:
+            return False
         qty = _optional_float(payload.get("qty"))
-        price = _optional_float(payload.get("price"))
-        if qty is not None and price is not None:
-            notional = qty * price
+        ref_price = _optional_float(payload.get("entry_ref_price"))
+        notional = qty * ref_price if qty is not None and ref_price is not None else None
+    else:
+        if str(payload.get("orderType", "")).lower() != "market":
+            return False
+        if str(payload.get("status", "")).lower() != "filled":
+            return False
+        raw_position = payload.get("position")
+        position: dict[str, Any] = raw_position if isinstance(raw_position, dict) else {}
+        if not position:
+            return False
+        if str(position.get("category", "")).lower() != "linear":
+            return False
+        notional = _optional_float(payload.get("notional_usdt"))
+        if notional is None:
+            notional = _optional_float(position.get("notional_usdt"))
+        if notional is None:
+            qty = _optional_float(payload.get("qty"))
+            price = _optional_float(payload.get("price"))
+            if qty is not None and price is not None:
+                notional = qty * price
     if notional is None or not math.isclose(notional, amount, rel_tol=0.02, abs_tol=1e-6):
         return False
     for decision_key, payload_key in (("stop_loss", "stopLoss"), ("take_profit", "takeProfit")):

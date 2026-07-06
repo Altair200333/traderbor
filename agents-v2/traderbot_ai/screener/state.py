@@ -27,13 +27,18 @@ class OpenPosition(BaseModel):
         return "long" if self.side in {"Buy", "long"} else "short"
 
 
+class StopoutEvent(BaseModel):
+    ts_ms: int
+    side: Side | None = None
+
+
 class TradingState(BaseModel):
     open_positions: list[OpenPosition] = Field(default_factory=list)
     last_candidate_ts: dict[str, int] = Field(default_factory=dict)
     last_candidate_quality: dict[str, CandidateQuality] = Field(default_factory=dict)
     last_stopout_ts: dict[str, int] = Field(default_factory=dict)
+    stopout_events: list[StopoutEvent] = Field(default_factory=list)
     trades_opened_today: int = 0
-    consecutive_stopouts: int = 0
     daily_realized_pnl_pct: float = 0.0
     weekly_realized_pnl_pct: float = 0.0
     halt: bool = False
@@ -110,7 +115,6 @@ def state_from_wallet_and_events(
     daily_pnl = 0.0
     weekly_pnl = 0.0
     opened_today = 0
-    closed_events: list[tuple[int, dict[str, Any]]] = []
 
     for record in events:
         raw_payload = record.get("payload")
@@ -122,7 +126,6 @@ def state_from_wallet_and_events(
         if event_type == "place_order" and day_start <= event_ms <= int(as_of_ms) and _is_filled_linear_order(payload):
             opened_today += 1
         if event_type == "position_closed":
-            closed_events.append((event_ms, payload))
             realized = _optional_float(payload.get("realized_pnl_usdt"))
             if realized is not None:
                 if day_start <= event_ms <= int(as_of_ms):
@@ -133,12 +136,12 @@ def state_from_wallet_and_events(
                 symbol = payload.get("symbol")
                 if symbol:
                     state.last_stopout_ts[normalize_symbol(str(symbol))] = event_ms
+                state.stopout_events.append(StopoutEvent(ts_ms=event_ms, side=_strategy_side(payload.get("side"))))
 
     state.trades_opened_today = opened_today
     if equity and equity > 0:
         state.daily_realized_pnl_pct = daily_pnl / equity
         state.weekly_realized_pnl_pct = weekly_pnl / equity
-    state.consecutive_stopouts = _consecutive_stopouts(closed_events)
     return state
 
 
@@ -190,13 +193,13 @@ def _is_stopout(payload: dict[str, Any]) -> bool:
     return realized is not None and realized < 0
 
 
-def _consecutive_stopouts(closed_events: list[tuple[int, dict[str, Any]]]) -> int:
-    count = 0
-    for _, payload in sorted(closed_events, key=lambda item: item[0], reverse=True):
-        if not _is_stopout(payload):
-            break
-        count += 1
-    return count
+def _strategy_side(value: Any) -> Side | None:
+    text = str(value or "").lower()
+    if text in {"buy", "long"}:
+        return "long"
+    if text in {"sell", "short"}:
+        return "short"
+    return None
 
 
 def _optional_float(value: Any) -> float | None:

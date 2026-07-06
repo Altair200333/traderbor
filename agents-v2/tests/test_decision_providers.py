@@ -70,6 +70,15 @@ def deterministic_replay_context() -> dict:
                     },
                 }
             ],
+            "candidate_view": [
+                {
+                    "symbol": "ETHUSDT",
+                    "side": "long",
+                    "quality": "hard",
+                    "failed_gates": [],
+                    "marginal_reasons": [],
+                }
+            ],
             "screener_candidates": ["ETHUSDT"],
             "global_blocks": [],
             "data_warnings": [],
@@ -97,6 +106,8 @@ class DecisionProviderTests(unittest.TestCase):
         self.assertIn("Settlement just applied:", prompt)
         self.assertIn("scan_momentum_universe", prompt)
         self.assertIn("get_candidate_detail", prompt)
+        self.assertIn("compute_indicators", prompt)
+        self.assertIn("run_analysis_code", prompt)
         self.assertIn("Never request 1m candles for signal analysis.", prompt)
         self.assertIn("Never call exchange write tools on hold paths except mandatory position-maintenance close_position calls.", prompt)
         self.assertIn("Do not call settle_exchange", prompt)
@@ -109,8 +120,21 @@ class DecisionProviderTests(unittest.TestCase):
         self.assertIn("sha256-test", prompt)
         self.assertIn("| ETHUSDT | long | P2 |", prompt)
         self.assertIn("scanned every closed 1h bar", prompt)
-        self.assertIn("screening survivors, not trade recommendations", prompt)
-        self.assertIn("Hold is the default for marginal survivors", prompt)
+        self.assertIn("high-recall screening triggers, not trade recommendations", prompt)
+        self.assertIn("deep-dive tools are limited to listed candidate symbols", prompt)
+        self.assertIn("compute_indicators", prompt)
+        self.assertIn("run_analysis_code", prompt)
+        self.assertIn("facts only, no trade plan", prompt)
+        self.assertIn("does not suggest entry, stop, or take-profit", prompt)
+        self.assertIn("Choose stop and take-profit yourself", prompt)
+        self.assertIn("Do not chase extended or late moves", prompt)
+        self.assertIn("trigger_age_bars=0", prompt)
+        self.assertNotIn("stop_is_inside_noise", prompt)
+        self.assertNotIn("recommended_stop_pct", prompt)
+        self.assertNotIn("structural_stop_pct", prompt)
+        self.assertNotIn("tp_beyond_first_level", prompt)
+        self.assertNotIn("stop_distance_pct", prompt)
+        self.assertNotIn('"plan"', prompt)
         self.assertIn("Do not call scan_momentum_universe", prompt)
         self.assertIn("use get_setup_digest", prompt)
         self.assertIn("Never call close_position, cancel_order, or settle_exchange", prompt)
@@ -179,14 +203,17 @@ class DecisionProviderTests(unittest.TestCase):
             os.environ["TRADERBOT_EXCHANGE_FEE_RATE"] = "0.001"
             os.environ["TRADERBOT_EXCHANGE_EXECUTION_INTERVAL"] = "1m"
 
-            def fake_run(command, input, text, capture_output, timeout, env, cwd):
+            def fake_run(command, input, text, encoding, errors, capture_output, timeout, env, cwd):
                 self.assertFalse(stale_audit_path.exists())
+                self.assertEqual(encoding, "utf-8")
                 self.assertIn("System instructions:", input)
                 self.assertIn("Replay step prompt:", input)
                 self.assertIn("Run id: run-1", input)
                 self.assertIn("Use the configured traderbot MCP tools", input)
                 self.assertIn("Use scan_momentum_universe once for the broad symbol scan", input)
                 self.assertIn("Use get_candidate_detail for at most 2 finalists", input)
+                self.assertIn("Use compute_indicators for standard indicator tables", input)
+                self.assertIn("Use run_analysis_code for custom bounded calculations", input)
                 self.assertIn("linear place_order.qty is base-asset quantity", input)
                 self.assertIn("--ignore-user-config", command)
                 self.assertIn("--full-auto", command)
@@ -263,14 +290,27 @@ class DecisionProviderTests(unittest.TestCase):
                 options=CodexCliOptions(output_dir=Path(tmp), codex_executable="codex-test", python_executable="python-test"),
             )
 
-            def fake_run(command, input, text, capture_output, timeout, env, cwd):
-                self.assertIn("Use the scan table and candidate_primitives", input)
+            def fake_run(command, input, text, encoding, errors, capture_output, timeout, env, cwd):
+                self.assertIn("Use the scan table and candidate list", input)
                 self.assertIn("Do not call scan_momentum_universe", input)
-                self.assertIn("deterministic MCP mode rejects broad/raw market-data bypasses", input)
+                self.assertIn("Use compute_indicators for standard indicator tables", input)
+                self.assertIn("Use run_analysis_code for custom bounded calculations", input)
+                self.assertIn("Use bounded get_candles only when raw rows are still needed", input)
+                self.assertIn("high-recall screening triggers", input)
+                self.assertIn("support/resistance levels (price, touches, age_bars, timeframe, nearest-first)", input)
+                self.assertNotIn("median_1h_range_pct", input)
+                self.assertIn("Choose stop and take-profit yourself", input)
+                self.assertIn("If the thesis names marginal/chase/late/extension", input)
+                self.assertNotIn("stop_is_inside_noise", input)
+                self.assertNotIn("recommended_stop_pct", input)
+                self.assertNotIn("Do not call scan_momentum_universe or get_candles", input)
                 self.assertNotIn("Use scan_momentum_universe once for the broad symbol scan", input)
                 self.assertEqual(env["TRADERBOT_SCREENER_MODE"], "deterministic")
                 command_text = "\n".join(command)
                 self.assertIn("mcp_servers.traderbot.env.TRADERBOT_SCREENER_MODE", command_text)
+                self.assertIn('mcp_servers.traderbot.env.TRADERBOT_ENTRY_POLICY="limit_retest"', command_text)
+                self.assertIn("mcp_servers.traderbot.env.TRADERBOT_RETEST_PULLBACK", command_text)
+                self.assertIn("mcp_servers.traderbot.env.TRADERBOT_RETEST_TTL_MIN", command_text)
                 final_path = Path(command[command.index("--output-last-message") + 1])
                 final_path.write_text(
                     json.dumps(
@@ -293,8 +333,15 @@ class DecisionProviderTests(unittest.TestCase):
                 )
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-            with patch("traderbot_ai.decision.codex_cli_provider.subprocess.run", side_effect=fake_run):
-                output = provider.decide(deterministic_replay_context())
+            policy_env = {"TRADERBOT_ENTRY_POLICY": "limit_retest", "TRADERBOT_RETEST_PULLBACK": "0.4", "TRADERBOT_RETEST_TTL_MIN": "120"}
+            old_env = {key: os.environ.get(key) for key in policy_env}
+            os.environ.update(policy_env)
+            try:
+                with patch("traderbot_ai.decision.codex_cli_provider.subprocess.run", side_effect=fake_run):
+                    output = provider.decide(deterministic_replay_context())
+            finally:
+                for key, value in old_env.items():
+                    _restore_env(key, value)
 
         self.assertEqual(output["final_decision"], "hold")
 
@@ -306,7 +353,7 @@ class DecisionProviderTests(unittest.TestCase):
                 options=CodexCliOptions(output_dir=Path(tmp), fail_open="hold"),
             )
 
-            def fake_run(command, input, text, capture_output, timeout, env, cwd):
+            def fake_run(command, input, text, encoding, errors, capture_output, timeout, env, cwd):
                 final_path = Path(command[command.index("--output-last-message") + 1])
                 final_path.write_text("not json", encoding="utf-8")
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -325,7 +372,7 @@ class DecisionProviderTests(unittest.TestCase):
                 options=CodexCliOptions(output_dir=Path(tmp), fail_open="hold"),
             )
 
-            def fake_run(command, input, text, capture_output, timeout, env, cwd):
+            def fake_run(command, input, text, encoding, errors, capture_output, timeout, env, cwd):
                 final_path = Path(command[command.index("--output-last-message") + 1])
                 final_path.write_text(
                     json.dumps(

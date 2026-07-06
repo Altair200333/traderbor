@@ -64,13 +64,14 @@ class ScreenerRealCacheTests(unittest.TestCase):
                     candidate_hits.append((as_of_ms, row.symbol, row.candidate, row.plan.pattern_used if row.plan else None, row.candidate_quality, row.failed_gates))
 
         self.assertGreaterEqual(checked_rows, 200)
-        self.assertIn((AVAX_CANDIDATE_AS_OF, "AVAXUSDT", "long", "P1", "hard", []), candidate_hits)
+        self.assertIn((AVAX_CANDIDATE_AS_OF, "AVAXUSDT", "long", "P1", "marginal_extension", ["S9b", "S9c"]), candidate_hits)
 
         result = scan(UNIVERSE, as_of_ms=AVAX_CANDIDATE_AS_OF, cache_path=self.cache_path)
         rows = {row.symbol: row for row in result.symbols}
         self.assertEqual(rows["AVAXUSDT"].candidate, "long")
         self.assertEqual(rows["AVAXUSDT"].plan.pattern_used, "P1")
-        self.assertEqual(rows["AVAXUSDT"].failed_gates, [])
+        self.assertEqual(rows["AVAXUSDT"].candidate_quality, "marginal_extension")
+        self.assertEqual(rows["AVAXUSDT"].failed_gates, ["S9b", "S9c"])
         self.assertIsNone(rows["SOLUSDT"].candidate)
         self.assertIn("S3", rows["SOLUSDT"].failed_gates)
         self.assertIn("S9b", rows["SOLUSDT"].failed_gates)
@@ -154,11 +155,11 @@ class ScreenerRealCacheTests(unittest.TestCase):
             self.skipTest(f"3m cache is required for P1H regression: {cache_path}")
 
         cases = [
-            ("2026-07-03T13:00:00Z", "PEPEUSDT"),
-            ("2026-07-01T16:00:00Z", "ZECUSDT"),
-            ("2026-06-26T17:00:00Z", "ADAUSDT"),
+            ("2026-07-03T13:00:00Z", "PEPEUSDT", "marginal_extension", ["S9b"]),
+            ("2026-07-01T16:00:00Z", "ZECUSDT", "marginal_extension", ["S9b"]),
+            ("2026-06-26T17:00:00Z", "ADAUSDT", "hard", []),
         ]
-        for as_of, symbol in cases:
+        for as_of, symbol, quality, failed_gates in cases:
             with self.subTest(as_of=as_of, symbol=symbol):
                 result = scan([symbol, "BTCUSDT"], as_of_ms=parse_time_ms(as_of), cache_path=cache_path)
                 row = {item.symbol: item for item in result.symbols}[symbol]
@@ -166,9 +167,10 @@ class ScreenerRealCacheTests(unittest.TestCase):
                 self.assertEqual(row.candidate, "long")
                 self.assertEqual(row.plan.pattern_used, "P1H")
                 self.assertIn("P1H", row.patterns_long)
-                self.assertEqual(row.failed_gates, [])
+                self.assertEqual(row.candidate_quality, quality)
+                self.assertEqual(row.failed_gates, failed_gates)
 
-    def test_marginal_extension_recovers_bounded_s9b_s9c_diagnostic_winner(self) -> None:
+    def test_marginal_extension_does_not_promote_last_hour_spike(self) -> None:
         cache_path = BROAD_CACHE_PATH.parent.parent / "broad-3m-20260706" / "market_cache.sqlite3"
         if not cache_path.exists():
             self.skipTest(f"3m cache is required for marginal extension regression: {cache_path}")
@@ -176,12 +178,10 @@ class ScreenerRealCacheTests(unittest.TestCase):
         result = scan(["ADAUSDT", "BTCUSDT"], as_of_ms=parse_time_ms("2026-07-01T04:00:00Z"), cache_path=cache_path)
         row = {item.symbol: item for item in result.symbols}["ADAUSDT"]
 
-        self.assertEqual(row.candidate, "long")
-        self.assertEqual(row.candidate_quality, "marginal_extension")
-        self.assertEqual(row.failed_gates, ["S9b", "S9c"])
-        self.assertEqual(row.plan.pattern_used, "P1")
-        self.assertIn("S9b_extension=", row.marginal_reasons[0])
-        self.assertIn("S9c_breakout=", row.marginal_reasons[1])
+        self.assertIsNone(row.candidate)
+        self.assertIsNone(row.candidate_quality)
+        self.assertEqual(row.failed_gates, ["S9a", "S9b", "S9c", "S11"])
+        self.assertEqual(row.marginal_reasons, [])
 
     def test_marginal_extension_does_not_promote_extreme_or_bad_rsi_rows(self) -> None:
         cache_path = BROAD_CACHE_PATH.parent.parent / "broad-3m-20260706" / "market_cache.sqlite3"
@@ -189,7 +189,7 @@ class ScreenerRealCacheTests(unittest.TestCase):
             self.skipTest(f"3m cache is required for marginal extension regression: {cache_path}")
 
         cases = [
-            ("2026-06-22T12:00:00Z", "SUIUSDT", ["S9a", "S9b", "S9c"]),
+            ("2026-06-22T12:00:00Z", "SUIUSDT", ["S9a", "S9b", "S9c", "S11"]),
             ("2026-07-02T12:00:00Z", "SOLUSDT", ["S4", "S9b", "S9c"]),
         ]
         for as_of, symbol, failed in cases:
@@ -224,16 +224,16 @@ class ScreenerRealCacheTests(unittest.TestCase):
         marginal_cache = BROAD_CACHE_PATH.parent.parent / "broad-3m-20260706" / "market_cache.sqlite3"
         if marginal_cache.exists():
             marginal = scan_window_summary(
-                ["ADAUSDT", "BTCUSDT"],
-                start_ms="2026-07-01T04:00:00Z",
-                end_ms="2026-07-01T05:00:00Z",
+                ["PEPEUSDT", "BTCUSDT"],
+                start_ms="2026-07-03T13:00:00Z",
+                end_ms="2026-07-03T14:00:00Z",
                 step_interval="1h",
                 cache_path=marginal_cache,
             )
             self.assertEqual(marginal["candidate_quality_counts"], {"marginal_extension": 1})
-            self.assertEqual(marginal["extension_gate_counts"], {"S9b+S9c": 1})
+            self.assertEqual(marginal["extension_gate_counts"], {"S9b": 1})
             self.assertEqual(marginal["candidates"][0]["quality"], "marginal_extension")
-            self.assertEqual(marginal["candidates"][0]["failed_gates"], ["S9b", "S9c"])
+            self.assertEqual(marginal["candidates"][0]["failed_gates"], ["S9b"])
             self.assertEqual(marginal["extension_misses"][0]["candidate_quality"], "marginal_extension")
 
         uneven = scan_window_summary(
@@ -285,23 +285,11 @@ class ScreenerRealCacheTests(unittest.TestCase):
         self.assertEqual(
             candidate_hits,
             [
-                (parse_time_ms("2026-06-02T16:00:00Z"), "SUIUSDT", "short", "P1H", "marginal_extension", ["S9b", "S9c"]),
-                (parse_time_ms("2026-06-05T08:00:00Z"), "ETHUSDT", "short", "P1H", "marginal_extension", ["S9b"]),
-                (parse_time_ms("2026-06-05T16:00:00Z"), "DOGEUSDT", "short", "P1H", "marginal_extension", ["S9b"]),
-                (parse_time_ms("2026-06-05T16:00:00Z"), "LINKUSDT", "short", "P1", "marginal_extension", ["S9b"]),
                 (parse_time_ms("2026-06-10T16:00:00Z"), "BTCUSDT", "long", "P1", "hard", []),
                 (parse_time_ms("2026-06-15T12:00:00Z"), "PEPEUSDT", "long", "P1", "marginal_extension", ["S9b", "S9c"]),
-                (parse_time_ms("2026-06-19T20:00:00Z"), "AVAXUSDT", "short", "P1H", "marginal_extension", ["S9b"]),
-                (parse_time_ms("2026-06-20T00:00:00Z"), "ZECUSDT", "long", "P1", "marginal_extension", ["S9b", "S9c"]),
-                (parse_time_ms("2026-06-23T08:00:00Z"), "SUIUSDT", "short", "P1H", "marginal_extension", ["S9b", "S9c"]),
-                (parse_time_ms("2026-06-25T16:00:00Z"), "XRPUSDT", "short", "P1H", "marginal_extension", ["S9b"]),
-                (parse_time_ms("2026-06-25T16:00:00Z"), "PEPEUSDT", "short", "P1H", "marginal_extension", ["S9b"]),
-                (parse_time_ms("2026-06-29T04:00:00Z"), "AVAXUSDT", "long", "P1", "marginal_extension", ["S9b", "S9c"]),
-                (parse_time_ms("2026-07-01T04:00:00Z"), "ADAUSDT", "long", "P1", "marginal_extension", ["S9b", "S9c"]),
-                (parse_time_ms("2026-07-01T16:00:00Z"), "ETHUSDT", "long", "P1", "marginal_extension", ["S9b"]),
-                (parse_time_ms("2026-07-01T16:00:00Z"), "DOGEUSDT", "long", "P1", "hard", []),
-                (parse_time_ms("2026-07-01T16:00:00Z"), "LINKUSDT", "long", "P1", "marginal_extension", ["S9b", "S9c"]),
-                (parse_time_ms("2026-07-01T16:00:00Z"), "ZECUSDT", "long", "P1H", "hard", []),
+                # ZECUSDT 2026-06-20 (marginal P1) is now rejected by the S11 z-score anti-chase ceiling.
+                (parse_time_ms("2026-07-01T16:00:00Z"), "DOGEUSDT", "long", "P1", "marginal_extension", ["S9b"]),
+                (parse_time_ms("2026-07-01T16:00:00Z"), "ZECUSDT", "long", "P1H", "marginal_extension", ["S9b"]),
                 (parse_time_ms("2026-07-03T04:00:00Z"), "ADAUSDT", "long", "P1H", "marginal_extension", ["S9b"]),
             ],
         )
@@ -322,23 +310,32 @@ class ScreenerRealCacheTests(unittest.TestCase):
             include_forward=False,
         )
 
+        # Re-baselined 2026-07-07 for screener-1.3.0 (S10/S11 anti-chase, rank cap, noise-floor d_final).
+        # Bisect on this window showed S10/S11 + rank cap account for 22 -> 20 candidates only;
+        # the previous 69-candidate baseline was stale relative to the late 2026-07-06 screener changes
+        # (this test is env-gated and had not been re-run).
+        # Re-baselined again for screener-1.3.1 (max_candidates_per_scan 2 -> 4): bisect on this window
+        # regains exactly one candidate, SOLUSDT long 2026-06-26T17:00 (P1 marginal_extension, S9b).
         self.assertEqual(summary["step_count"], 880)
         self.assertEqual(summary["checked_rows"], 880 * len(symbols))
         self.assertEqual(summary["status_counts"]["ok"], 880 * len(UNIVERSE))
         self.assertEqual(summary["status_counts"]["insufficient_data"], 880)
         self.assertEqual(summary["data_warnings"][f"{MISSING_SYMBOL}:insufficient_data"], 880)
-        self.assertEqual(summary["candidate_count"], 69)
-        self.assertEqual(summary["candidate_quality_counts"], {"hard": 27, "marginal_extension": 42})
-        self.assertEqual(summary["extension_gate_counts"], {"S9b+S9c": 92, "S9b": 59, "S9c": 5})
-        self.assertEqual(summary["hard_candidate_cooldown_block_counts"], {"hard": 5})
+        self.assertEqual(summary["candidate_count"], 21)
+        self.assertEqual(summary["candidate_quality_counts"], {"hard": 7, "marginal_extension": 14})
+        self.assertEqual(summary["extension_gate_counts"], {"S9b+S9c": 74, "S9b": 49})
+        self.assertEqual(summary["hard_candidate_cooldown_block_counts"], {})
         candidates = {
             (item["as_of_iso"], item["symbol"], item["side"], item["pattern"], item["quality"], tuple(item["failed_gates"]))
             for item in summary["candidates"]
         }
         self.assertIn(("2026-06-26T17:00:00Z", "AVAXUSDT", "long", "P1", "hard", ()), candidates)
-        self.assertIn(("2026-07-01T04:00:00Z", "ADAUSDT", "long", "P1", "marginal_extension", ("S9b", "S9c")), candidates)
+        self.assertIn(("2026-06-26T17:00:00Z", "SOLUSDT", "long", "P1", "marginal_extension", ("S9b",)), candidates)
         self.assertIn(("2026-07-01T16:00:00Z", "ETHUSDT", "long", "P1", "marginal_extension", ("S9b",)), candidates)
-        self.assertIn(("2026-07-03T13:00:00Z", "PEPEUSDT", "long", "P1H", "hard", ()), candidates)
+        self.assertIn(("2026-07-03T04:00:00Z", "ADAUSDT", "long", "P1H", "marginal_extension", ("S9b",)), candidates)
+        self.assertIn(("2026-07-03T13:00:00Z", "PEPEUSDT", "long", "P1H", "marginal_extension", ("S9b",)), candidates)
+        # ADAUSDT 2026-07-01T04:00 (marginal P1, S9b+S9c) is now rejected by the S11 z-score ceiling.
+        self.assertNotIn(("2026-07-01T04:00:00Z", "ADAUSDT", "long", "P1", "marginal_extension", ("S9b", "S9c")), candidates)
 
 
 def _symbols_with_1h(cache_path: Path) -> set[str]:

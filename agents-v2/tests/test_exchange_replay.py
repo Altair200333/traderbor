@@ -25,6 +25,7 @@ from traderbot_ai.simulator.clock import (
 )
 from traderbot_ai.simulator.exchange_replay import ExchangeReplayConfig, _apply_runner_maintenance, _validate_decision_exchange_consistency, build_exchange_replay_config, exchange_tool_environment, run_exchange_replay
 from traderbot_ai.simulator.market_cache import Candle, LocalMarketCache
+from traderbot_ai.tools import simulator as simulator_tools
 from traderbot_ai.tools.exchange import _agent_tool_response, place_order_impl, reset_exchange_impl, set_leverage_impl, settle_exchange_impl
 
 
@@ -66,6 +67,8 @@ class ExchangeReplayTests(unittest.TestCase):
 
         self.assertIn("get_candles", names)
         self.assertIn("get_current_price", names)
+        self.assertIn("compute_indicators", names)
+        self.assertIn("run_analysis_code", names)
         self.assertIn("scan_momentum_universe", names)
         self.assertIn("get_candidate_detail", names)
         self.assertIn("get_wallet_compact", names)
@@ -83,7 +86,7 @@ class ExchangeReplayTests(unittest.TestCase):
         self.assertNotIn("get_order_book", names)
         self.assertNotIn("codex_code_worker", names)
 
-    def test_deterministic_exchange_replay_tools_hide_broad_scan_raw_candles_and_maintenance_writes(self) -> None:
+    def test_deterministic_exchange_replay_tools_allow_bounded_candles_and_hide_broad_scan_and_maintenance_writes(self) -> None:
         settings = Settings(
             model="test",
             vision_model="test",
@@ -97,7 +100,10 @@ class ExchangeReplayTests(unittest.TestCase):
 
         names = {getattr(tool, "name", "") for tool in build_tools(settings, exchange_replay=True, screener_mode="deterministic")}
 
+        self.assertIn("get_candles", names)
         self.assertIn("get_current_price", names)
+        self.assertIn("compute_indicators", names)
+        self.assertIn("run_analysis_code", names)
         self.assertIn("get_setup_digest", names)
         self.assertIn("get_wallet_compact", names)
         self.assertIn("get_recent_trade_events", names)
@@ -106,12 +112,34 @@ class ExchangeReplayTests(unittest.TestCase):
         self.assertIn("set_leverage", names)
         self.assertIn("validate_order", names)
         self.assertIn("calculate_position_size", names)
-        self.assertNotIn("get_candles", names)
         self.assertNotIn("scan_momentum_universe", names)
         self.assertNotIn("get_candidate_detail", names)
         self.assertNotIn("close_position", names)
         self.assertNotIn("cancel_order", names)
         self.assertNotIn("settle_exchange", names)
+
+    def test_simulator_get_candles_uses_deterministic_deep_dive_guard(self) -> None:
+        old_mode = os.environ.get("TRADERBOT_SCREENER_MODE")
+        old_candidates = os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES")
+        try:
+            os.environ["TRADERBOT_SCREENER_MODE"] = "deterministic"
+            os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"] = json.dumps([{"symbol": BTC, "side": "long"}])
+            wrong_interval = simulator_tools.get_candles_impl(BTC, interval="1m", as_of=BASE_MS, limit=1)
+            wrong_symbol = simulator_tools.get_candles_impl("XRPUSDT", interval="1h", as_of=BASE_MS, limit=1)
+        finally:
+            if old_mode is None:
+                os.environ.pop("TRADERBOT_SCREENER_MODE", None)
+            else:
+                os.environ["TRADERBOT_SCREENER_MODE"] = old_mode
+            if old_candidates is None:
+                os.environ.pop("TRADERBOT_DETERMINISTIC_CANDIDATES", None)
+            else:
+                os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"] = old_candidates
+
+        self.assertFalse(wrong_interval["ok"])
+        self.assertIn("only allows 1h or 4h", wrong_interval["error"])
+        self.assertFalse(wrong_symbol["ok"])
+        self.assertIn("runner candidates and BTC/ETH/SOL", wrong_symbol["error"])
 
     def test_deterministic_hold_rejects_provider_position_close_events(self) -> None:
         decision = {"final_decision": "hold", "symbol": BTC, "amount": 0.0}
@@ -120,6 +148,93 @@ class ExchangeReplayTests(unittest.TestCase):
         _validate_decision_exchange_consistency(decision, events, allow_hold_position_closes=True)
         with self.assertRaisesRegex(RuntimeError, "hold decision produced disallowed exchange events"):
             _validate_decision_exchange_consistency(decision, events, allow_hold_position_closes=False)
+
+    def test_limit_retest_pending_entry_event_satisfies_decision_validation(self) -> None:
+        decision = {
+            "final_decision": "long",
+            "symbol": BTC,
+            "amount": 100.0,
+            "stop_loss": 96.0,
+            "take_profit": 110.0,
+        }
+        pending_event = {
+            "type": "place_order",
+            "payload": {
+                "category": "linear",
+                "symbol": BTC,
+                "side": "Buy",
+                "orderType": "Limit",
+                "status": "New",
+                "qty": 1.0,
+                "price": 98.4,
+                "entry_policy": "limit_retest",
+                "entry_ref_price": 100.0,
+                "expires_at_ms": 1_704_067_200_000 + 120 * 60_000,
+                "stopLoss": 96.0,
+                "takeProfit": 110.0,
+            },
+        }
+
+        _validate_decision_exchange_consistency(
+            decision,
+            [pending_event],
+            allowed_entry_candidates={(BTC, "long")},
+            strict_entry_events=True,
+        )
+        # without the policy marker a pending limit must NOT satisfy an entry decision
+        unmarked = {"type": "place_order", "payload": {**pending_event["payload"]}}
+        unmarked["payload"].pop("entry_policy")
+        with self.assertRaisesRegex(RuntimeError, "does not match the place_order exchange event"):
+            _validate_decision_exchange_consistency(decision, [unmarked], allowed_entry_candidates={(BTC, "long")})
+        # a policy event without an expiry is malformed
+        no_expiry = {"type": "place_order", "payload": {**pending_event["payload"]}}
+        no_expiry["payload"].pop("expires_at_ms")
+        with self.assertRaisesRegex(RuntimeError, "does not match the place_order exchange event"):
+            _validate_decision_exchange_consistency(decision, [no_expiry], allowed_entry_candidates={(BTC, "long")})
+        # the pending shape also satisfies validation when the policy is explicitly expected
+        _validate_decision_exchange_consistency(
+            decision,
+            [pending_event],
+            allowed_entry_candidates={(BTC, "long")},
+            strict_entry_events=True,
+            expected_entry_policy="limit_retest",
+        )
+
+    def test_configured_limit_retest_rejects_silent_market_fill(self) -> None:
+        # regression: MCP env not forwarded -> order placed as a plain Market fill;
+        # a run configured for limit_retest must fail loudly, not run as next_open
+        decision = {
+            "final_decision": "long",
+            "symbol": BTC,
+            "amount": 100.0,
+            "stop_loss": 96.0,
+            "take_profit": 110.0,
+        }
+        market_event = {
+            "type": "place_order",
+            "payload": {
+                "category": "linear",
+                "symbol": BTC,
+                "side": "Buy",
+                "orderType": "Market",
+                "status": "Filled",
+                "qty": 1.0,
+                "price": 100.0,
+                "notional_usdt": 100.0,
+                "stopLoss": 96.0,
+                "takeProfit": 110.0,
+                "position": {"category": "linear", "notional_usdt": 100.0},
+            },
+        }
+
+        _validate_decision_exchange_consistency(decision, [market_event], allowed_entry_candidates={(BTC, "long")})
+        with self.assertRaisesRegex(RuntimeError, "expected entry policy: limit_retest"):
+            _validate_decision_exchange_consistency(
+                decision,
+                [market_event],
+                allowed_entry_candidates={(BTC, "long")},
+                expected_entry_policy="limit_retest",
+            )
 
     def test_deterministic_entry_validation_requires_runner_candidate_and_rejects_extra_writes(self) -> None:
         decision = {
@@ -705,6 +820,10 @@ class ExchangeReplayTests(unittest.TestCase):
         self.assertEqual(contexts[0]["screener_candidates"], [BTC])
         self.assertEqual(contexts[0]["candidate_primitives"][0]["side"], "long")
         self.assertNotIn("marginal_score", contexts[0]["candidate_primitives"][0])
+        self.assertEqual(contexts[0]["candidate_view"][0]["symbol"], BTC)
+        self.assertEqual(contexts[0]["candidate_view"][0]["side"], "long")
+        self.assertNotIn("plan", contexts[0]["candidate_view"][0])
+        self.assertNotIn("signal_candidate_before_state", contexts[0]["candidate_view"][0])
         self.assertEqual(os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES"), old_candidates_env)
 
     def test_run_exchange_replay_deterministic_cooldown_suppresses_repeated_hold_candidates(self) -> None:

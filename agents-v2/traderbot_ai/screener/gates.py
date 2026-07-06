@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from traderbot_ai.screener.config import ScreenerConfig
 from traderbot_ai.screener.market import normalize_symbol
 from traderbot_ai.screener.patterns import PatternHit, Side
-from traderbot_ai.screener.state import CandidateQuality, TradingState, candidate_cooldown_entry
+from traderbot_ai.screener.state import CandidateQuality, StopoutEvent, TradingState, candidate_cooldown_entry
 
 
 class GateResult(BaseModel):
@@ -34,6 +34,8 @@ def evaluate_signal_gates(
     funding: float | None,
     patterns: list[PatternHit],
     cfg: ScreenerConfig,
+    range_expansion: float | None = None,
+    zscore: float | None = None,
 ) -> dict[str, GateResult]:
     return {
         "S1": _threshold("S1", roc_4h, cfg.roc_4h_long if side == "long" else cfg.roc_4h_short, ">=" if side == "long" else "<="),
@@ -47,6 +49,8 @@ def evaluate_signal_gates(
         "S9a": _last_hour_share(roc_1h_last, roc_4h, cfg),
         "S9b": _extension(close, ema20, atr, cfg),
         "S9c": _breakout_distance(side, close, atr, patterns, cfg),
+        "S10": _range_expansion_ceiling(range_expansion, cfg),
+        "S11": _zscore_ceiling(side, zscore, cfg),
         "PAT": GateResult(passed=bool(patterns), value=",".join(pattern.id for pattern in patterns) if patterns else None, threshold="pattern"),
     }
 
@@ -54,7 +58,7 @@ def evaluate_signal_gates(
 def state_blocks(symbol: str, side: Side, state: TradingState, as_of_ms: int, cfg: ScreenerConfig, signal_quality: CandidateQuality | None = None) -> tuple[list[str], list[str]]:
     normalized = normalize_symbol(symbol)
     per_symbol = []
-    global_blocks = scan_global_blocks(state, cfg)
+    global_blocks = scan_global_blocks(state, cfg, as_of_ms)
     same_direction = sum(1 for position in state.open_positions if position.strategy_side == side)
     if same_direction >= cfg.max_same_direction:
         per_symbol.append("max_same_direction")
@@ -67,8 +71,8 @@ def state_blocks(symbol: str, side: Side, state: TradingState, as_of_ms: int, cf
     last_stopout = state.last_stopout_ts.get(normalized)
     if last_stopout is not None and int(as_of_ms) - int(last_stopout) < cfg.cooldown_stopout_ms:
         per_symbol.append("cooldown_stopout")
-    if state.consecutive_stopouts >= cfg.stopout_pause_count:
-        global_blocks.append("stopout_pause")
+    if side in stoploss_guard_locked_sides(state, as_of_ms, cfg):
+        per_symbol.append(f"stoploss_guard_{side}")
     if state.daily_realized_pnl_pct <= cfg.daily_loss_limit_pct:
         global_blocks.append("daily_loss_limit")
     if state.weekly_realized_pnl_pct <= cfg.weekly_loss_limit_pct:
@@ -76,7 +80,7 @@ def state_blocks(symbol: str, side: Side, state: TradingState, as_of_ms: int, cf
     return per_symbol, sorted(set(global_blocks))
 
 
-def scan_global_blocks(state: TradingState, cfg: ScreenerConfig) -> list[str]:
+def scan_global_blocks(state: TradingState, cfg: ScreenerConfig, as_of_ms: int) -> list[str]:
     global_blocks = []
     if state.halt:
         global_blocks.append("halt_active")
@@ -84,13 +88,34 @@ def scan_global_blocks(state: TradingState, cfg: ScreenerConfig) -> list[str]:
         global_blocks.append("max_trades_per_day")
     if len(state.open_positions) >= cfg.max_open_positions:
         global_blocks.append("max_positions")
-    if state.consecutive_stopouts >= cfg.stopout_pause_count:
-        global_blocks.append("stopout_pause")
+    if stoploss_guard_locked_sides(state, as_of_ms, cfg) == {"long", "short"}:
+        global_blocks.append("stoploss_guard")
     if state.daily_realized_pnl_pct <= cfg.daily_loss_limit_pct:
         global_blocks.append("daily_loss_limit")
     if state.weekly_realized_pnl_pct <= cfg.weekly_loss_limit_pct:
         global_blocks.append("weekly_loss_limit")
     return sorted(set(global_blocks))
+
+
+def stoploss_guard_locked_sides(state: TradingState, as_of_ms: int, cfg: ScreenerConfig) -> set[Side]:
+    """Sides locked by the stop-out guard: scoped, window-based, auto-expiring."""
+    events = state.stopout_events
+    if not cfg.stoploss_guard_only_per_side:
+        return {"long", "short"} if _stoploss_guard_lock_active(events, as_of_ms, cfg) else set()
+    locked: set[Side] = set()
+    for side in ("long", "short"):
+        side_events = [event for event in events if event.side == side or event.side is None]
+        if _stoploss_guard_lock_active(side_events, as_of_ms, cfg):
+            locked.add(side)
+    return locked
+
+
+def _stoploss_guard_lock_active(events: list[StopoutEvent], as_of_ms: int, cfg: ScreenerConfig) -> bool:
+    window_start = int(as_of_ms) - cfg.stoploss_guard_lookback_ms
+    recent = [int(event.ts_ms) for event in events if window_start <= int(event.ts_ms) <= int(as_of_ms)]
+    if len(recent) < cfg.stoploss_guard_trade_limit:
+        return False
+    return int(as_of_ms) < max(recent) + cfg.stoploss_guard_stop_duration_ms
 
 
 def gates_pass(gates: dict[str, GateResult]) -> bool:
@@ -149,6 +174,20 @@ def _extension(close: float, ema20: float | None, atr: float | None, cfg: Screen
     value = abs(close - ema20) / atr
     passed = value <= cfg.ext_atr_max
     return GateResult(passed=passed, value=value, threshold=cfg.ext_atr_max, reason=None if passed else "S9b_extension")
+
+
+def _range_expansion_ceiling(range_expansion: float | None, cfg: ScreenerConfig) -> GateResult:
+    if range_expansion is None:
+        return GateResult(passed=True, reason="not_applicable")
+    passed = range_expansion <= cfg.s10_range_expansion_max
+    return GateResult(passed=passed, value=range_expansion, threshold=cfg.s10_range_expansion_max, reason=None if passed else "S10_range_expansion")
+
+
+def _zscore_ceiling(side: Side, zscore: float | None, cfg: ScreenerConfig) -> GateResult:
+    if zscore is None:
+        return GateResult(passed=True, reason="not_applicable")
+    passed = zscore <= cfg.s11_zscore_max if side == "long" else zscore >= -cfg.s11_zscore_max
+    return GateResult(passed=passed, value=zscore, threshold=cfg.s11_zscore_max if side == "long" else -cfg.s11_zscore_max, reason=None if passed else "S11_zscore")
 
 
 def _breakout_distance(side: Side, close: float, atr: float | None, patterns: list[PatternHit], cfg: ScreenerConfig) -> GateResult:

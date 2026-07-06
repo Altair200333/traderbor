@@ -205,6 +205,9 @@ class SimulatedExchange:
         fee_rate: float = 0.0,
         as_of: str | int | float | None = None,
         mark_interval: str = "1m",
+        expiresAtMs: int | float | None = None,
+        entryPolicy: str | None = None,
+        entryRefPrice: float | None = None,
     ) -> dict[str, Any]:
         mark_interval = _parse_interval(mark_interval)
         category = _parse_category(category)
@@ -229,6 +232,13 @@ class SimulatedExchange:
         as_of_ms = parse_time_ms(as_of)
         if as_of_ms is None:
             raise ValueError("as_of is required")
+        expires_at_ms = None if expiresAtMs is None else int(expiresAtMs)
+        if expires_at_ms is not None:
+            if order_type != "Limit" or category != "linear":
+                raise ValueError("expiresAtMs is only supported for linear Limit orders")
+            if expires_at_ms <= as_of_ms:
+                raise ValueError("expiresAtMs must be after as_of")
+        entry_ref_price = _optional_positive(entryRefPrice, "entryRefPrice")
         normalized = normalize_symbol(symbol)
         with _STATE_LOCK:
             state = self.load()
@@ -269,6 +279,9 @@ class SimulatedExchange:
                     leverage,
                     fee_rate,
                     as_of_ms,
+                    expires_at_ms=expires_at_ms,
+                    entry_policy=entryPolicy,
+                    entry_ref_price=entry_ref_price,
                 )
             state["updated_at"] = _now_iso()
             state["as_of_ms"] = as_of_ms
@@ -358,6 +371,7 @@ class SimulatedExchange:
                 "settled_until_ms": as_of_ms,
                 "filled_orders": advanced["filled_orders"],
                 "closed_positions": advanced["closed_positions"],
+                "expired_orders": advanced["expired_orders"],
                 "state": state,
             }
 
@@ -440,7 +454,7 @@ class SimulatedExchange:
             return {"closed_position": closed, "state": state}
 
     def _advance_state_to(self, state: dict[str, Any], as_of_ms: int, interval: str, fee_rate: float) -> dict[str, list[dict[str, Any]]]:
-        filled_orders = self._fill_limit_orders(state, as_of_ms, interval, fee_rate)
+        filled_orders, expired_orders = self._fill_limit_orders(state, as_of_ms, interval, fee_rate)
         remaining = []
         closed = []
         for position in list(state.get("positions", [])):
@@ -454,15 +468,17 @@ class SimulatedExchange:
             closed.append(closed_position)
         state["positions"] = remaining
         state.setdefault("closed_positions", []).extend(closed)
-        return {"filled_orders": filled_orders, "closed_positions": closed}
+        return {"filled_orders": filled_orders, "closed_positions": closed, "expired_orders": expired_orders}
 
     def _log_advanced_events(self, advanced: dict[str, list[dict[str, Any]]]) -> None:
         self._log_filled_orders(advanced.get("filled_orders", []))
+        for expired_order in advanced.get("expired_orders", []):
+            self._log("order_expired", expired_order)
         for closed_position in advanced.get("closed_positions", []):
             self._log("position_closed", closed_position)
 
     def _save_advanced_if_any(self, state: dict[str, Any], as_of_ms: int, advanced: dict[str, list[dict[str, Any]]]) -> None:
-        if not advanced.get("filled_orders") and not advanced.get("closed_positions"):
+        if not advanced.get("filled_orders") and not advanced.get("closed_positions") and not advanced.get("expired_orders"):
             return
         state["updated_at"] = _now_iso()
         state["as_of_ms"] = as_of_ms
@@ -539,6 +555,9 @@ class SimulatedExchange:
         leverage: float | None,
         fee_rate: float,
         as_of_ms: int | None,
+        expires_at_ms: int | None = None,
+        entry_policy: str | None = None,
+        entry_ref_price: float | None = None,
     ) -> dict[str, Any]:
         leverage_value = _parse_leverage(leverage) if leverage is not None else self._leverage_for(state, "linear", symbol, side)
         self._validate_tpsl(side, price, take_profit, stop_loss)
@@ -556,6 +575,13 @@ class SimulatedExchange:
                 "locked_amount": margin,
             }
         )
+        if expires_at_ms is not None:
+            record["expires_at_ms"] = expires_at_ms
+            record["expires_at"] = _iso(expires_at_ms)
+        if entry_policy is not None:
+            record["entry_policy"] = entry_policy
+        if entry_ref_price is not None:
+            record["entry_ref_price"] = entry_ref_price
         if order_type == "Market":
             position = self._position_from_order(record, opened_at_ms=record["created_at_ms"])
             state.setdefault("positions", []).append(position)
@@ -563,21 +589,27 @@ class SimulatedExchange:
         state.setdefault("orders", []).append(record)
         return record
 
-    def _fill_limit_orders(self, state: dict[str, Any], as_of_ms: int, interval: str, fee_rate: float = 0.0) -> list[dict[str, Any]]:
+    def _fill_limit_orders(self, state: dict[str, Any], as_of_ms: int, interval: str, fee_rate: float = 0.0) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         remaining = []
         filled = []
+        expired = []
         for order in state.get("orders", []):
             if order.get("orderType") != "Limit":
                 remaining.append(order)
                 continue
             candle = self._limit_fill_candle(order, as_of_ms, interval)
-            if candle is None:
-                remaining.append(order)
+            if candle is not None:
+                fill = self._fill_limit_order(state, order, candle, fee_rate)
+                filled.append(fill)
                 continue
-            fill = self._fill_limit_order(state, order, candle, fee_rate)
-            filled.append(fill)
+            expires_at_ms = order.get("expires_at_ms")
+            if expires_at_ms is not None and as_of_ms >= int(expires_at_ms):
+                self._release_order_lock(state, order)
+                expired.append({**order, "status": "Expired", "expired_at_ms": int(expires_at_ms), "expired_at": _iso(int(expires_at_ms))})
+                continue
+            remaining.append(order)
         state["orders"] = remaining
-        return filled
+        return filled, expired
 
     def _limit_fill_candle(self, order: dict[str, Any], as_of_ms: int, interval: str) -> Candle | None:
         candles = self.cache.get_candles(
@@ -589,7 +621,10 @@ class SimulatedExchange:
         )
         side = _parse_side(order["side"])
         limit_price = float(order["price"])
+        expires_at_ms = order.get("expires_at_ms")
         for candle in candles:
+            if expires_at_ms is not None and candle.open_time >= int(expires_at_ms):
+                return None
             if side == "Buy" and candle.low <= limit_price:
                 return candle
             if side == "Sell" and candle.high >= limit_price:

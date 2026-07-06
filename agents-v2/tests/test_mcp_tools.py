@@ -37,9 +37,10 @@ def candle_at_close(
     *,
     interval: str = "1m",
     duration_ms: int = 60_000,
+    symbol: str = BTC,
 ) -> Candle:
     return Candle(
-        symbol=BTC,
+        symbol=symbol,
         interval=interval,
         open_time=close_time - duration_ms + 1,
         close_time=close_time,
@@ -58,6 +59,8 @@ class McpToolTests(unittest.TestCase):
         self.assertIn("scan_momentum_universe", names)
         self.assertIn("get_setup_digest", names)
         self.assertIn("get_candidate_detail", names)
+        self.assertIn("compute_indicators", names)
+        self.assertIn("run_analysis_code", names)
         self.assertIn("get_wallet", names)
         self.assertIn("set_leverage", names)
         self.assertIn("place_order", names)
@@ -180,25 +183,106 @@ class McpToolTests(unittest.TestCase):
         self.assertEqual(result["fresh_symbol_count"], 0)
         self.assertEqual(result["rejected"][0]["status"], "insufficient_data")
 
-    def test_deterministic_mcp_mode_blocks_raw_broad_and_maintenance_tools(self) -> None:
-        old_mode = os.environ.get("TRADERBOT_SCREENER_MODE")
+    def test_scan_momentum_universe_rejects_future_as_of_under_simulation_clock(self) -> None:
+        previous_process_clock = process_simulation_clock_ms()
+        previous_file_clock = file_simulation_clock_ms()
         try:
-            os.environ["TRADERBOT_SCREENER_MODE"] = "deterministic"
-            candles = mcp_tools.get_candles(BTC, interval="1h", as_of=BASE_MS, limit=170)
-            scan = mcp_tools.scan_momentum_universe([BTC], as_of=BASE_MS)
-            cancel = mcp_tools.cancel_order(order_id="o1", as_of=BASE_MS)
-            close = mcp_tools.close_position(position_id="p1", as_of=BASE_MS)
+            clear_process_simulation_clock_state()
+            set_file_simulation_clock_state(BASE_MS)
+            result = mcp_tools.scan_momentum_universe([BTC], as_of=BASE_MS + 1)
         finally:
-            _restore_env("TRADERBOT_SCREENER_MODE", old_mode)
+            if previous_file_clock is None:
+                clear_file_simulation_clock_state()
+            else:
+                set_file_simulation_clock_state(previous_file_clock)
+            if previous_process_clock is None:
+                clear_process_simulation_clock_state()
+            else:
+                set_process_simulation_clock_state(previous_process_clock)
 
-        self.assertFalse(candles["ok"])
-        self.assertIn("raw candles are disabled", candles["error"])
+        self.assertFalse(result["ok"])
+        self.assertIn("exceeds simulation clock", result["error"])
+
+    def test_deterministic_mcp_mode_allows_only_bounded_candidate_and_anchor_candles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = LocalMarketCache(Path(tmp) / "market.sqlite3")
+            cache.upsert_candles(
+                [
+                    candle_at_close(BASE_MS, 100.0, 101.0, 99.0, 100.0, interval="1h", duration_ms=60 * 60_000),
+                    candle_at_close(BASE_MS, 200.0, 201.0, 199.0, 200.0, interval="4h", duration_ms=4 * 60 * 60_000, symbol="ETHUSDT"),
+                ]
+            )
+            old_mode = os.environ.get("TRADERBOT_SCREENER_MODE")
+            old_candidates = os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES")
+            old_cache = os.environ.get("TRADERBOT_MARKET_CACHE_PATH")
+            try:
+                os.environ["TRADERBOT_SCREENER_MODE"] = "deterministic"
+                os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"] = json.dumps([{"symbol": BTC, "side": "long"}])
+                os.environ["TRADERBOT_MARKET_CACHE_PATH"] = str(cache.path)
+                candidate = mcp_tools.get_candles(BTC, interval="1h", as_of=BASE_MS, limit=1)
+                anchor = mcp_tools.get_candles("ETHUSDT", interval="4h", as_of=BASE_MS, limit=1)
+                wrong_symbol = mcp_tools.get_candles("XRPUSDT", interval="1h", as_of=BASE_MS, limit=1)
+                wrong_interval = mcp_tools.get_candles(BTC, interval="1m", as_of=BASE_MS, limit=1)
+                too_many_1h = mcp_tools.get_candles(BTC, interval="1h", as_of=BASE_MS, limit=171)
+                too_many_4h = mcp_tools.get_candles(BTC, interval="4h", as_of=BASE_MS, limit=61)
+                missing_as_of = mcp_tools.get_candles(BTC, interval="1h", limit=1)
+                ranged = mcp_tools.get_candles(BTC, interval="1h", as_of=BASE_MS, start_time=BASE_MS - 60_000, end_time=BASE_MS, limit=1)
+                scan = mcp_tools.scan_momentum_universe([BTC], as_of=BASE_MS)
+                cancel = mcp_tools.cancel_order(order_id="o1", as_of=BASE_MS)
+                close = mcp_tools.close_position(position_id="p1", as_of=BASE_MS)
+            finally:
+                _restore_env("TRADERBOT_SCREENER_MODE", old_mode)
+                _restore_env("TRADERBOT_DETERMINISTIC_CANDIDATES", old_candidates)
+                _restore_env("TRADERBOT_MARKET_CACHE_PATH", old_cache)
+
+        self.assertTrue(candidate["ok"], candidate)
+        self.assertEqual(candidate["symbol"], BTC)
+        self.assertTrue(anchor["ok"], anchor)
+        self.assertEqual(anchor["symbol"], "ETHUSDT")
+        self.assertFalse(wrong_symbol["ok"])
+        self.assertIn("runner candidates and BTC/ETH/SOL", wrong_symbol["error"])
+        self.assertFalse(wrong_interval["ok"])
+        self.assertIn("only allows 1h or 4h", wrong_interval["error"])
+        self.assertFalse(too_many_1h["ok"])
+        self.assertIn("limit for 1h must be <= 170", too_many_1h["error"])
+        self.assertFalse(too_many_4h["ok"])
+        self.assertIn("limit for 4h must be <= 60", too_many_4h["error"])
+        self.assertFalse(missing_as_of["ok"])
+        self.assertIn("requires exact as_of", missing_as_of["error"])
+        self.assertFalse(ranged["ok"])
+        self.assertIn("does not allow start_time or end_time", ranged["error"])
         self.assertFalse(scan["ok"])
         self.assertIn("broad scan already ran", scan["error"])
         self.assertFalse(cancel["ok"])
         self.assertIn("does not allow provider cancels", cancel["error"])
         self.assertFalse(close["ok"])
         self.assertIn("does not allow provider maintenance closes", close["error"])
+
+    def test_deterministic_mcp_get_candles_rejects_future_as_of_under_simulation_clock(self) -> None:
+        old_mode = os.environ.get("TRADERBOT_SCREENER_MODE")
+        old_candidates = os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES")
+        previous_process_clock = process_simulation_clock_ms()
+        previous_file_clock = file_simulation_clock_ms()
+        try:
+            clear_process_simulation_clock_state()
+            set_file_simulation_clock_state(BASE_MS)
+            os.environ["TRADERBOT_SCREENER_MODE"] = "deterministic"
+            os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"] = json.dumps([{"symbol": BTC, "side": "long"}])
+            result = mcp_tools.get_candles(BTC, interval="1h", as_of=BASE_MS + 1, limit=1)
+        finally:
+            _restore_env("TRADERBOT_SCREENER_MODE", old_mode)
+            _restore_env("TRADERBOT_DETERMINISTIC_CANDIDATES", old_candidates)
+            if previous_file_clock is None:
+                clear_file_simulation_clock_state()
+            else:
+                set_file_simulation_clock_state(previous_file_clock)
+            if previous_process_clock is None:
+                clear_process_simulation_clock_state()
+            else:
+                set_process_simulation_clock_state(previous_process_clock)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("exceeds simulation clock", result["error"])
 
     def test_deterministic_setup_digest_rejects_non_finalist(self) -> None:
         old_mode = os.environ.get("TRADERBOT_SCREENER_MODE")
@@ -287,6 +371,289 @@ class McpToolTests(unittest.TestCase):
         event_types = [json.loads(line)["type"] for line in event_text.splitlines()]
         self.assertNotIn("place_order", event_types)
 
+    def test_deterministic_entry_drift_error_unit(self) -> None:
+        from traderbot_ai.tools import replay_helpers
+
+        old_mode = os.environ.get("TRADERBOT_SCREENER_MODE")
+        old_candidates = os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES")
+        try:
+            os.environ["TRADERBOT_SCREENER_MODE"] = "deterministic"
+            os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"] = json.dumps(
+                [
+                    {"symbol": BTC, "side": "long", "ref_price": 100.0, "max_drift_pct": 0.02},
+                    {"symbol": "ETHUSDT", "side": "short", "ref_price": 100.0, "max_drift_pct": 0.02},
+                ]
+            )
+
+            adverse_long = replay_helpers.deterministic_entry_drift_error(BTC, "long", 103.0)
+            within_long = replay_helpers.deterministic_entry_drift_error(BTC, "long", 101.9)
+            favorable_long = replay_helpers.deterministic_entry_drift_error(BTC, "long", 95.0)
+            adverse_short = replay_helpers.deterministic_entry_drift_error("ETHUSDT", "short", 97.0)
+            favorable_short = replay_helpers.deterministic_entry_drift_error("ETHUSDT", "short", 103.0)
+            unknown_symbol = replay_helpers.deterministic_entry_drift_error("SOLUSDT", "long", 103.0)
+
+            os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"] = json.dumps([{"symbol": BTC, "side": "long"}])
+            no_ref = replay_helpers.deterministic_entry_drift_error(BTC, "long", 103.0)
+        finally:
+            _restore_env("TRADERBOT_SCREENER_MODE", old_mode)
+            _restore_env("TRADERBOT_DETERMINISTIC_CANDIDATES", old_candidates)
+
+        self.assertIsNotNone(adverse_long)
+        self.assertFalse(adverse_long["ok"])
+        self.assertIn("drifted", adverse_long["error"])
+        self.assertAlmostEqual(adverse_long["entry_drift_pct"], 0.03)
+        self.assertIsNone(within_long)
+        self.assertIsNone(favorable_long)
+        self.assertIsNotNone(adverse_short)
+        self.assertAlmostEqual(adverse_short["entry_drift_pct"], -0.03)
+        self.assertIsNone(favorable_short)
+        self.assertIsNone(unknown_symbol)
+        self.assertIsNone(no_ref)
+
+    def test_deterministic_place_order_rejects_adverse_entry_drift_before_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state_path = tmp_path / "state.json"
+            events_path = tmp_path / "events.jsonl"
+            cache = LocalMarketCache(tmp_path / "market.sqlite3")
+            cache.upsert_candles([candle_at_close(BASE_MS, 103.0, 103.5, 102.5, 103.0)])
+            old_mode = os.environ.get("TRADERBOT_SCREENER_MODE")
+            old_candidates = os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES")
+            previous_process_clock = process_simulation_clock_ms()
+            previous_file_clock = file_simulation_clock_ms()
+            try:
+                os.environ["TRADERBOT_SCREENER_MODE"] = "deterministic"
+                os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"] = json.dumps(
+                    [{"symbol": BTC, "side": "long", "ref_price": 100.0, "max_drift_pct": 0.02}]
+                )
+                set_simulation_clock_state(BASE_MS)
+                with exchange_tool_environment(state_path, events_path, backend="simulated", fee_rate=0.0, cache_path=cache.path, execution_interval="1m"):
+                    reset_exchange_impl('{"USDT": 1000}', as_of=BASE_MS)
+                    result = mcp_tools.place_order(
+                        "linear",
+                        BTC,
+                        "Buy",
+                        "Market",
+                        qty=1.0,
+                        takeProfit=110.0,
+                        stopLoss=100.5,
+                        orderLinkId="drift-reject",
+                        as_of=BASE_MS,
+                    )
+                    event_text = events_path.read_text(encoding="utf-8") if events_path.exists() else ""
+            finally:
+                _restore_env("TRADERBOT_SCREENER_MODE", old_mode)
+                _restore_env("TRADERBOT_DETERMINISTIC_CANDIDATES", old_candidates)
+                if previous_file_clock is None:
+                    clear_file_simulation_clock_state()
+                else:
+                    set_file_simulation_clock_state(previous_file_clock)
+                if previous_process_clock is None:
+                    clear_process_simulation_clock_state()
+                else:
+                    set_process_simulation_clock_state(previous_process_clock)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("drifted", result["error"])
+        event_types = [json.loads(line)["type"] for line in event_text.splitlines() if line.strip()]
+        self.assertNotIn("place_order", event_types)
+
+    def test_deterministic_place_order_allows_entry_within_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state_path = tmp_path / "state.json"
+            events_path = tmp_path / "events.jsonl"
+            cache = LocalMarketCache(tmp_path / "market.sqlite3")
+            cache.upsert_candles([candle_at_close(BASE_MS, 101.5, 102.0, 101.0, 101.5)])
+            old_mode = os.environ.get("TRADERBOT_SCREENER_MODE")
+            old_candidates = os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES")
+            previous_process_clock = process_simulation_clock_ms()
+            previous_file_clock = file_simulation_clock_ms()
+            try:
+                os.environ["TRADERBOT_SCREENER_MODE"] = "deterministic"
+                os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"] = json.dumps(
+                    [{"symbol": BTC, "side": "long", "ref_price": 100.0, "max_drift_pct": 0.02}]
+                )
+                set_simulation_clock_state(BASE_MS)
+                with exchange_tool_environment(state_path, events_path, backend="simulated", fee_rate=0.0, cache_path=cache.path, execution_interval="1m"):
+                    reset_exchange_impl('{"USDT": 1000}', as_of=BASE_MS)
+                    result = mcp_tools.place_order(
+                        "linear",
+                        BTC,
+                        "Buy",
+                        "Market",
+                        qty=1.0,
+                        takeProfit=106.5,
+                        stopLoss=99.0,
+                        orderLinkId="drift-allow",
+                        as_of=BASE_MS,
+                    )
+                    event_text = events_path.read_text(encoding="utf-8") if events_path.exists() else ""
+            finally:
+                _restore_env("TRADERBOT_SCREENER_MODE", old_mode)
+                _restore_env("TRADERBOT_DETERMINISTIC_CANDIDATES", old_candidates)
+                if previous_file_clock is None:
+                    clear_file_simulation_clock_state()
+                else:
+                    set_file_simulation_clock_state(previous_file_clock)
+                if previous_process_clock is None:
+                    clear_process_simulation_clock_state()
+                else:
+                    set_process_simulation_clock_state(previous_process_clock)
+
+        self.assertTrue(result["ok"], msg=str(result))
+        event_types = [json.loads(line)["type"] for line in event_text.splitlines() if line.strip()]
+        self.assertIn("place_order", event_types)
+
+    def test_limit_retest_policy_rewrites_market_entry_into_pending_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state_path = tmp_path / "state.json"
+            events_path = tmp_path / "events.jsonl"
+            cache = LocalMarketCache(tmp_path / "market.sqlite3")
+            cache.upsert_candles([candle_at_close(BASE_MS, 101.5, 102.0, 101.0, 101.5)])
+            old_mode = os.environ.get("TRADERBOT_SCREENER_MODE")
+            old_candidates = os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES")
+            previous_process_clock = process_simulation_clock_ms()
+            previous_file_clock = file_simulation_clock_ms()
+            try:
+                os.environ["TRADERBOT_SCREENER_MODE"] = "deterministic"
+                os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"] = json.dumps(
+                    [{"symbol": BTC, "side": "long", "ref_price": 100.0, "max_drift_pct": 0.02}]
+                )
+                set_simulation_clock_state(BASE_MS)
+                with exchange_tool_environment(
+                    state_path,
+                    events_path,
+                    backend="simulated",
+                    fee_rate=0.0,
+                    cache_path=cache.path,
+                    execution_interval="1m",
+                    entry_policy="limit_retest",
+                    retest_pullback=0.4,
+                    retest_ttl_min=120,
+                ):
+                    reset_exchange_impl('{"USDT": 1000}', as_of=BASE_MS)
+                    result = mcp_tools.place_order(
+                        "linear",
+                        BTC,
+                        "Buy",
+                        "Market",
+                        qty=1.0,
+                        takeProfit=106.5,
+                        stopLoss=99.0,
+                        orderLinkId="retest-rewrite",
+                        as_of=BASE_MS,
+                    )
+                    event_text = events_path.read_text(encoding="utf-8") if events_path.exists() else ""
+            finally:
+                _restore_env("TRADERBOT_SCREENER_MODE", old_mode)
+                _restore_env("TRADERBOT_DETERMINISTIC_CANDIDATES", old_candidates)
+                if previous_file_clock is None:
+                    clear_file_simulation_clock_state()
+                else:
+                    set_file_simulation_clock_state(previous_file_clock)
+                if previous_process_clock is None:
+                    clear_process_simulation_clock_state()
+                else:
+                    set_process_simulation_clock_state(previous_process_clock)
+
+        self.assertTrue(result["ok"], msg=str(result))
+        policy_info = result["entry_policy"]
+        self.assertEqual(policy_info["policy"], "limit_retest")
+        self.assertEqual(policy_info["entry_ref_price"], 101.5)
+        # 0.4 * (101.5 - 99.0) = 1.0 below the reference entry
+        self.assertAlmostEqual(policy_info["limit_price"], 100.5)
+        self.assertEqual(policy_info["expires_at_ms"], BASE_MS + 120 * 60_000)
+        order = result["order"]
+        self.assertEqual(order["orderType"], "Limit")
+        self.assertEqual(order["status"], "New")
+        self.assertAlmostEqual(order["price"], 100.5)
+        self.assertEqual(order["expires_at_ms"], BASE_MS + 120 * 60_000)
+        self.assertEqual(order["entry_policy"], "limit_retest")
+        self.assertEqual(order["stopLoss"], 99.0)
+        self.assertEqual(order["takeProfit"], 106.5)
+        payloads = [json.loads(line) for line in event_text.splitlines() if line.strip()]
+        order_events = [item["payload"] for item in payloads if item["type"] == "place_order"]
+        self.assertEqual(len(order_events), 1)
+        self.assertEqual(order_events[0]["orderType"], "Limit")
+        self.assertEqual(order_events[0]["entry_policy"], "limit_retest")
+
+    def test_deterministic_place_order_enforces_volatility_noise_floor_stop(self) -> None:
+        one_hour = 3_600_000
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state_path = tmp_path / "state.json"
+            events_path = tmp_path / "events.jsonl"
+            cache = LocalMarketCache(tmp_path / "market.sqlite3")
+            cache.upsert_candles([candle_at_close(BASE_MS, 100.0, 100.5, 99.5, 100.0)])
+            cache.upsert_candles(
+                [
+                    Candle(
+                        symbol=BTC,
+                        interval="1h",
+                        open_time=BASE_MS - (k + 1) * one_hour,
+                        close_time=BASE_MS - k * one_hour - 1,
+                        open=100.0,
+                        high=100.8,
+                        low=99.2,
+                        close=100.0,
+                        volume=1.0,
+                    )
+                    for k in range(0, 50)
+                ]
+            )
+            old_mode = os.environ.get("TRADERBOT_SCREENER_MODE")
+            old_candidates = os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES")
+            previous_process_clock = process_simulation_clock_ms()
+            previous_file_clock = file_simulation_clock_ms()
+            try:
+                os.environ["TRADERBOT_SCREENER_MODE"] = "deterministic"
+                os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"] = json.dumps([{"symbol": BTC, "side": "long"}])
+                set_simulation_clock_state(BASE_MS)
+                with exchange_tool_environment(state_path, events_path, backend="simulated", fee_rate=0.0, cache_path=cache.path, execution_interval="1m"):
+                    reset_exchange_impl('{"USDT": 1000}', as_of=BASE_MS)
+                    too_tight = mcp_tools.place_order(
+                        "linear",
+                        BTC,
+                        "Buy",
+                        "Market",
+                        qty=1.0,
+                        takeProfit=104.0,
+                        stopLoss=98.4,
+                        orderLinkId="noise-tight",
+                        as_of=BASE_MS,
+                    )
+                    wide_enough = mcp_tools.place_order(
+                        "linear",
+                        BTC,
+                        "Buy",
+                        "Market",
+                        qty=1.0,
+                        takeProfit=106.0,
+                        stopLoss=97.3,
+                        orderLinkId="noise-wide",
+                        as_of=BASE_MS,
+                    )
+            finally:
+                _restore_env("TRADERBOT_SCREENER_MODE", old_mode)
+                _restore_env("TRADERBOT_DETERMINISTIC_CANDIDATES", old_candidates)
+                if previous_file_clock is None:
+                    clear_file_simulation_clock_state()
+                else:
+                    set_file_simulation_clock_state(previous_file_clock)
+                if previous_process_clock is None:
+                    clear_process_simulation_clock_state()
+                else:
+                    set_process_simulation_clock_state(previous_process_clock)
+
+        self.assertFalse(too_tight["ok"])
+        self.assertIn("risk validation failed", too_tight["error"])
+        self.assertAlmostEqual(too_tight["risk_validation"]["noise_floor_stop_pct"], 0.024)
+        self.assertTrue(any("stop" in error.lower() for error in too_tight["risk_validation"]["errors"]))
+        self.assertTrue(wide_enough["ok"], msg=str(wide_enough))
+        self.assertAlmostEqual(wide_enough["risk_validation"]["noise_floor_stop_pct"], 0.024)
+
     def test_write_tools_require_as_of_and_order_link_id(self) -> None:
         missing_as_of = mcp_tools.place_order("linear", BTC, "Buy", "Market", qty=1.0, takeProfit=110.0, stopLoss=96.0, orderLinkId="o1")
         missing_link = mcp_tools.place_order("linear", BTC, "Buy", "Market", qty=1.0, takeProfit=110.0, stopLoss=96.0, as_of=BASE_MS)
@@ -357,6 +724,26 @@ class McpToolTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(len(result["events"]), 1)
         self.assertEqual(result["events"][0]["payload"]["created_at_ms"], BASE_MS - 60 * 60_000)
+
+    def test_get_recent_trade_events_rejects_future_as_of_under_simulation_clock(self) -> None:
+        previous_process_clock = process_simulation_clock_ms()
+        previous_file_clock = file_simulation_clock_ms()
+        try:
+            clear_process_simulation_clock_state()
+            set_file_simulation_clock_state(BASE_MS)
+            result = mcp_tools.get_recent_trade_events(BASE_MS + 1, lookback_hours=2)
+        finally:
+            if previous_file_clock is None:
+                clear_file_simulation_clock_state()
+            else:
+                set_file_simulation_clock_state(previous_file_clock)
+            if previous_process_clock is None:
+                clear_process_simulation_clock_state()
+            else:
+                set_process_simulation_clock_state(previous_process_clock)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("exceeds simulation clock", result["error"])
 
     def test_write_tools_use_replay_env_paths_and_compact_exchange_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

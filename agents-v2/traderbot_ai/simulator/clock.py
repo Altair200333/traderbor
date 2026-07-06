@@ -65,7 +65,7 @@ def file_simulation_clock_ms() -> int | None:
     path = simulation_clock_path()
     if not path.exists():
         return None
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
     value = data.get("as_of_ms")
     return int(value) if value is not None else None
 

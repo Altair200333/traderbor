@@ -200,6 +200,9 @@ def cmd_exchange_replay(args: argparse.Namespace) -> None:
         events_path=args.events_path,
         replay_path=args.replay_path,
         screener_mode=args.screener_mode,
+        entry_policy=args.entry_policy,
+        retest_pullback=args.retest_pullback,
+        retest_ttl_min=args.retest_ttl_min,
     )
     provider_name = args.decision_provider or ("hold" if args.decision_mode == "hold" else "openai-agents")
     if args.decision_mode == "hold" and provider_name != "hold":
@@ -384,6 +387,9 @@ def build_parser() -> argparse.ArgumentParser:
     exchange_replay.add_argument("--decision-mode", choices=["agent", "hold"], default="agent", help="Compatibility alias. Use --decision-provider for new runs.")
     exchange_replay.add_argument("--decision-provider", choices=["openai-agents", "codex-cli-mcp", "hold"], help="Decision provider for replay.")
     exchange_replay.add_argument("--screener-mode", choices=["off", "deterministic", "legacy-self-screen"], default="off", help="Deterministic runner-owned screener mode. Default preserves legacy provider-side screening.")
+    exchange_replay.add_argument("--entry-policy", choices=["next_open", "limit_retest"], default="next_open", help="Runner-owned entry policy (limit_retest requires --screener-mode deterministic).")
+    exchange_replay.add_argument("--retest-pullback", type=float, default=0.4)
+    exchange_replay.add_argument("--retest-ttl-min", type=int, default=120)
     exchange_replay.add_argument("--codex-model", help="Model for --decision-provider codex-cli-mcp. If omitted, Codex CLI chooses its configured/default model.")
     exchange_replay.add_argument("--codex-reasoning-effort", choices=["low", "medium", "high", "xhigh"], help="Codex model_reasoning_effort config override.")
     exchange_replay.add_argument("--codex-profile", help="Codex config profile for --decision-provider codex-cli-mcp.")

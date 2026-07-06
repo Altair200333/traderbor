@@ -8,6 +8,7 @@ from traderbot_ai.paths import PROJECT_ROOT
 from traderbot_ai.runtime.run_context import current_worklog_root
 from traderbot_ai.schemas import TradeDecision
 from traderbot_ai.tools.charts import list_stored_charts, load_chart_metadata, store_chart
+from traderbot_ai.tools.analysis import compute_indicators, run_analysis_code
 from traderbot_ai.tools import market as live_market
 from traderbot_ai.tools import simulator as simulator_tools
 from traderbot_ai.tools import replay_helpers as replay_helper_tools
@@ -60,7 +61,7 @@ def build_tools(
     tools = []
     deterministic_replay = exchange_replay and screener_mode == "deterministic"
     if deterministic_replay:
-        market_tools = [simulator_tools.get_current_price]
+        market_tools = [simulator_tools.get_candles, simulator_tools.get_current_price]
     elif backtest or exchange_replay or settings.market_data_mode == "cache":
         market_tools = [simulator_tools.get_candles, simulator_tools.get_current_price]
     else:
@@ -109,6 +110,13 @@ def build_tools(
             name="simulator",
             description="Local cached market data and deterministic TP/SL simulation tools.",
             tools=simulator_namespace_tools,
+        )
+    )
+    tools.extend(
+        tool_namespace(
+            name="analysis",
+            description="Lookahead-safe candle indicator and scratch analysis tools.",
+            tools=[compute_indicators, run_analysis_code],
         )
     )
     if exchange_replay:
@@ -206,8 +214,8 @@ Step 1. Settlement and position maintenance:
 - Never move a stop farther from safety, average down, pyramid, flip, chase, or manually trail.
 
 Step 2. Risk state reconstruction:
-- From wallet, settlement visible in the prompt, and your prior order link ids when visible, reconstruct trades opened this UTC day, realized PnL this UTC day and week, consecutive stop-outs, per-symbol 4h candidate cooldowns, and 24h post-stop cooldowns.
-- Hard limits: stop opening if daily realized loss <= -3% equity; halt if weekly realized loss <= -6%; pause new entries for 24h after 3 consecutive stop-outs.
+- From wallet, settlement visible in the prompt, and your prior order link ids when visible, reconstruct trades opened this UTC day, realized PnL this UTC day and week, recent stop-outs, per-symbol 4h candidate cooldowns, and 24h post-stop cooldowns.
+- Hard limits: stop opening if daily realized loss <= -3% equity; halt if weekly realized loss <= -6%; after 3 stop-outs on one side within 24h, pause new entries on that side for 6 hours from the last stop-out.
 - Hard limits: max 3 new trades per UTC day, max 3 simultaneous positions, max 2 in one direction, max 1 per symbol.
 - New daily risk from positions opened today must stay <= 1.5% equity.
 - Prefer 1x leverage. Never exceed 2x leverage.
@@ -226,7 +234,9 @@ Step 3. Coarse scan:
 Step 4. Shortlist deep check:
 - Rank survivors by abs(ROC_4h) times coarse_4h_volume_ratio. Take at most 2 finalists.
 - If get_candidate_detail is available, call it for each finalist and use its closed-candle 1h facts for the gates below. Do not call get_candles for finalist 1h data unless candidate detail failed or omitted a required fact.
-- Only if candidate detail is unavailable, failed, or omitted a required fact, request 1h candles with limit 170 for finalists only.
+- If candidate detail is unavailable, failed, or omitted a required fact, prefer compute_indicators for finalist 1h/4h indicator facts and optional chart artifacts.
+- Use run_analysis_code only for custom bounded calculations over the finalist/context candles loaded by the tool itself.
+- Only if candidate detail and compute_indicators are unavailable, failed, or omitted a required raw fact, request 1h candles with limit 170 for finalists only.
 - Verify all gates on closed candles:
   - S3 volume: last closed 1h volume / median 1h volume over the previous 24 bars >= 2.0.
   - S4 RSI(14, 1h): long in [55, 78]; short in [22, 45].
@@ -236,9 +246,9 @@ Step 4. Shortlist deep check:
   - S8 funding: only if tools or prompt provide it. Block longs above +0.05% and shorts below -0.05%. If missing, mark missing and be conservative.
   - S9 anti-chase: all checks below must pass.
 - S9 anti-chase:
-  - Last-hour share: abs(ROC of the last closed 1h candle) <= 0.6 * abs(ROC_4h). A move concentrated in one candle is a spike, not a trend.
-  - Extension: abs(close - EMA20(1h)) <= 2.0 * ATR(14, 1h).
-  - For P1/P3 breakouts, the breakout bar must close within 1.0 * ATR(14, 1h) of the broken boundary. If price ran farther, hold and wait for retest or a fresh continuation setup.
+  - Last-hour share: abs(ROC of the last closed 1h candle) <= 0.45 * abs(ROC_4h). A move concentrated in one candle is a spike, not a trend.
+  - Extension: abs(close - EMA20(1h)) <= 1.5 * ATR(14, 1h).
+  - For P1/P3 breakouts, the breakout bar must close within 0.8 * ATR(14, 1h) of the broken boundary. If price ran farther, hold and wait for retest or a fresh continuation setup.
 - Pattern must be at least one of:
   - P1 range breakout: close_1h above max high or below min low of the previous 20 closed 1h bars.
   - P1H accepted breakout hold: a P1 range breakout happened within the previous 6 closed 1h bars and the current close still holds beyond that original boundary.
@@ -247,9 +257,12 @@ Step 4. Shortlist deep check:
 - A candidate that fails any gate is dead for this step. If the setup is mixed, stale, or unsupported by data, return hold.
 
 Step 5. Plan construction:
-- Stop distance must be the larger of 1.0-1.5 * ATR(14, 1h) as a fraction of price and structural invalidation distance.
-- P1/P3 structural stop: beyond the broken boundary with a 0.3 * ATR buffer, mirrored for shorts.
-- P2 structural stop: beyond the min low for longs or max high for shorts of the last 3 closed 1h bars, with a 0.25 * ATR buffer.
+- Stop distance must be the larger of 2.0 * ATR(14, 1h) as a fraction of price, the noise floor, and structural invalidation distance.
+- P1/P3 structural stop: beyond the broken boundary or nearest support/resistance with a 0.5 * ATR buffer, mirrored for shorts.
+- P2 structural stop: beyond the min low for longs or max high for shorts of the last 3 closed 1h bars, or nearest support/resistance if farther, with a 0.5 * ATR buffer.
+- Use get_setup_digest support/resistance facts before entry. Levels are sorted nearest-first with touches, age_bars, and timeframe; for longs, cite the first support level; for shorts, the first resistance level. Respect the first opposing level on the TP side (resistance above for longs, support below for shorts). For shorts this is a hard rule: the first support below is where bounces start; set TP in front of that support, and if RR then falls below 1.5, hold. For longs it is advisory: prefer TP at the front of the first resistance when RR stays >= 1.5; TP beyond the level is acceptable only for a quality=hard candidate with retest_seen=true (a confirmed fresh breakout is expected to break overhead levels); otherwise hold. The digest provides no recommended stop, bars, or noise metrics: derive the stop from structural invalidation and typical bar noise (ATR and recent 1h candles you fetch yourself). Enter only if the chosen stop is feasible, risk budget holds, and RR remains >= 1.5 at a realistic TP. Otherwise hold. Never tighten the stop to fit risk.
+- retest_seen counts only closed bars after the breakout trigger bar. retest_seen=false with trigger_age_bars=0 means a retest is not possible yet, not that a retest failed.
+- Shorts are not mirrored longs: crypto downside moves are impulsive and mean-revert fast. Do not short an exhausted move: prefer fresh breakdowns confirmed by retest_seen=true, avoid short entries with RSI near the oversold bound or price extended more than 1.5 ATR below EMA20(1h), and require the TP to be reachable before the first support below.
 - Stop distance must be in [1.0%, 4.0%] after tick rounding. If the structural stop needs more than 4.0%, return hold; do not tighten the stop to fit.
 - Take profit uses tp_rr * stop distance. Defaults by pattern: P1 = 2.5, P1H = 2.0, P2 = 2.0, P3 = 2.5.
 - You may deviate within [1.5, 3.0] only with an explicit structural reason in risk_summary. Never default to the minimum.
@@ -296,11 +309,11 @@ Replay momentum strategy and job description:
 - Trade only disciplined 4h-24h swing-momentum setups on crypto USDT perpetuals.
 - The replay runner owns settlement, TP/SL settlement, max-hold checks, impulse-break maintenance, and the broad deterministic screener.
 - The runner scans each closed 1h bar and calls you only when deterministic closed-candle screening produced at least one entry candidate.
-- Deterministic candidates are screening survivors, not trade recommendations. Hold is the default for marginal survivors.
-- Candidate quality is explicit. quality=hard means all S1-S9 gates passed. quality=marginal_extension means only bounded S9b/S9c extension gates failed on a P1/P1H/P3 setup; treat it as a lower-quality watchlist item and usually hold unless structure, risk geometry, and broader context are unusually clean.
-- Treat the provided scan table, scan hash, and candidate primitives as the canonical Step 3/4 screener result for this as_of.
-- Do not call scan_momentum_universe and do not fetch raw candles for broad screening.
-- Use get_setup_digest only for a listed candidate when you need more structural detail.
+- Deterministic candidates are high-recall screening triggers, not trade recommendations.
+- Candidate quality is explicit. quality=hard means all S1-S11 gates passed. quality=marginal_extension means only bounded S9b/S9c extension gates failed on a P1/P1H/P3 setup; treat it as a lower-quality watchlist item that needs deeper confirmation, conservative sizing, and clean structure/context before entry.
+- Treat the provided scan table, scan hash, and candidate list as the canonical Step 3/4 screener result for this as_of. The screener provides facts only; it does not suggest entry, stop, or take-profit.
+- Do not call scan_momentum_universe and do not fetch candles for broad screening.
+- You may use bounded closed-candle deep dives after a candidate appears: get_setup_digest for listed candidates; compute_indicators for listed candidate symbols plus BTCUSDT, ETHUSDT, and SOLUSDT context anchors; run_analysis_code only for custom calculations over those same tool-loaded candles; and get_candles only when you truly need raw rows. Deterministic market/analysis tools require exact as_of, allow only 1h limit <= 170 or 4h limit <= 60, and reject 1m/start_time/end_time style lookahead.
 - Use tools for all facts. Never invent prices, balances, candles, funding, order-book data, files, or chart paths.
 - Cached market tools are the only source of market truth. Exchange tools are the only source of wallet/order truth.
 - Pass the exact as_of from the user prompt to every exchange write tool that accepts as_of. set_leverage has no as_of argument.
@@ -315,24 +328,33 @@ Step 1. Accept runner settlement and maintenance:
 - Call get_wallet or get_wallet_compact only when you need to confirm current equity, open positions, or available balance.
 
 Step 2. Risk state reconstruction:
-- From wallet, settlement, maintenance actions, recent trade events, and visible prior order link ids, reconstruct trades opened this UTC day, realized PnL this UTC day and week, consecutive stop-outs, per-symbol 4h candidate cooldowns, and 24h post-stop cooldowns.
-- Hard limits: stop opening if daily realized loss <= -3% equity; halt if weekly realized loss <= -6%; pause new entries for 24h after 3 consecutive stop-outs.
+- From wallet, settlement, maintenance actions, recent trade events, and visible prior order link ids, reconstruct trades opened this UTC day, realized PnL this UTC day and week, per-symbol 4h candidate cooldowns, and 24h post-stop cooldowns.
+- Hard limits: stop opening if daily realized loss <= -3% equity; halt if weekly realized loss <= -6%.
+- Stop-out streak locks are runner-enforced, side-scoped, and auto-expiring (3 stop-outs on one side within 24h lock that side for 6h from the last stop-out). They appear in global blocks or candidate blocked_by; treat them as facts and do not invent additional global pauses.
 - Hard limits: max 3 new trades per UTC day, max 3 simultaneous positions, max 2 in one direction, max 1 per symbol.
 - New daily risk from positions opened today must stay <= 1.5% equity.
 - Prefer 1x leverage. Never exceed 2x leverage.
 - If a counter cannot be reconstructed, assume the conservative value and say so in risk_summary.
 
 Step 3. Deterministic candidate judgment:
-- Consider only candidates listed in candidate_primitives.
-- The screener already computed S1-S9, BTC regime, P1/P2/P3, anti-chase, cooldown/state blocks, and plan primitives on closed 1h bars.
+- Consider only candidates listed in the deterministic candidate list.
+- The screener already computed S1-S11, BTC regime, P1/P2/P3, anti-chase, and cooldown/state blocks on closed 1h bars.
 - A candidate can still be rejected for risk budget, poor structure, missing required data, stale/mixed thesis, invalid stop/TP geometry, or low expected edge after fees/slippage.
-- For quality=marginal_extension, explicitly cite the failed S9b/S9c values from marginal_reasons and return hold unless the extension looks like accepted momentum rather than chase.
+- For quality=marginal_extension, explicitly cite the failed S9b/S9c values from marginal_reasons and enter only when bounded candle/context review shows accepted momentum rather than chase.
 - Passed screener gates and a valid risk check are necessary but not sufficient for entry.
 - Use get_setup_digest for at most 2 listed candidates if the prompt table and candidate primitives do not contain enough structure.
+- Veto-first admission: if your thesis or risk review names marginal, chase, late, extension, stretched, climax, large last candle, or last-hour impulse as the main risk, return hold unless get_setup_digest reports retest_seen=true for that candidate and side and your stop sits outside both structural support/resistance and typical bar noise. A retest you infer yourself from candles does not lift this veto; only the digest retest_seen field does.
+- Use compute_indicators for candidate 1h/4h structure, BTC/ETH/SOL context, and indicator tables when the scan table and digest are not enough.
+- Use run_analysis_code for bounded scratch Python only after loading data through the analysis tool boundary. The code receives df/candles already cut at as_of. Do not read raw cache, exchange state, or future files from scratch code.
+- Use bounded get_candles for raw candidate rows only when compute_indicators/digest are not enough. Do not use it to rescan the universe.
 - Never request 1m candles for signal analysis.
 
 Step 4. Plan construction:
-- Use the runner-provided plan primitives as the default entry, stop, take-profit, pattern id, stop distance, and tp_rr. P1H is a recent accepted P1 breakout hold, not a fresh breakout chase.
+- The screener provides no reference plan. Build entry, stop, and take-profit yourself from closed 1h/4h structure and volatility evidence; risk validation and strict runner entry checks are authoritative. P1H is a recent accepted P1 breakout hold, not a fresh breakout chase.
+- Stop distance must be the larger of 2.0 * ATR(14, 1h) as a fraction of price, typical bar noise (judge from ATR and recent 1h candles you fetch yourself), and structural invalidation distance beyond the broken boundary or nearest support/resistance with a 0.5 * ATR buffer.
+- Use get_setup_digest support/resistance facts before entry. Levels are sorted nearest-first with touches, age_bars, and timeframe; for longs, cite the first support level; for shorts, the first resistance level. Respect the first opposing level on the TP side (resistance above for longs, support below for shorts). For shorts this is a hard rule: the first support below is where bounces start; set TP in front of that support, and if RR then falls below 1.5, hold. For longs it is advisory: prefer TP at the front of the first resistance when RR stays >= 1.5; TP beyond the level is acceptable only for a quality=hard candidate with retest_seen=true (a confirmed fresh breakout is expected to break overhead levels); otherwise hold. Enter only if the chosen stop is feasible, risk budget holds, and RR remains >= 1.5 at a realistic TP. Otherwise hold. Never tighten the stop to fit risk.
+- retest_seen counts only closed bars after the breakout trigger bar. retest_seen=false with trigger_age_bars=0 means a retest is not possible yet, not that a retest failed.
+- Shorts are not mirrored longs: crypto downside moves are impulsive and mean-revert fast. Do not short an exhausted move: prefer fresh breakdowns confirmed by retest_seen=true, avoid short entries with RSI near the oversold bound or price extended more than 1.5 ATR below EMA20(1h), and require the TP to be reachable before the first support below.
 - Stop distance must be in [1.0%, 4.0%] after tick rounding. If the structural stop needs more than 4.0%, return hold; do not tighten the stop to fit.
 - Reward:risk must be >= 1.5 after rounding.
 - Geometry must be valid: long stop_loss < price < take_profit; short take_profit < price < stop_loss.
@@ -356,8 +378,9 @@ Step 6. Output:
 
 Worklog in replay mode:
 - Workspace tools are read-only here. You may read helpers or notes when a decision depends on prior work.
-- Do not attempt writes, do not refactor, and do not do unrelated code exploration during a replay step.
+- Do not attempt workspace/source writes, do not refactor, and do not do unrelated code exploration during a replay step.
 - Notes are memory, not truth. They never override exchange state or cached market data.
+- Scratch analysis through run_analysis_code is allowed only for decision analysis over tool-provided candles. Use MCP/tool outputs for data; do not read raw cache or exchange state files directly to bypass as_of guards.
 """
 
 
@@ -389,6 +412,8 @@ Screener and analysis duties:
 - The target architecture is: reusable local code calculates signals and gates; you judge the setup.
 - Creating and refining that screener is part of your job over time. Do it when workspace write/code tools are available and it helps future decisions.
 - Reuse existing screener/helper code before doing one-off manual calculations in prose. If code execution tools are not available, read the helper source/notes and use only facts available from tools or the prompt.
+- Prefer compute_indicators for standard indicators and bounded chart artifacts. Use run_analysis_code for custom tables, correlations, small models, and signal checks over candles loaded by the tool itself.
+- In replay/backtest, always pass the exact as_of to analysis tools. Do not use analysis code to read raw cache/state files directly; the tool-loaded df/candles are the allowed data boundary.
 - A useful screener should move toward calculating S1-S8 style momentum, trend, volume, RSI, ATR, BTC-regime, funding, cooldown, and P1/P2/P3 pattern facts.
 - During backtest or exchange replay steps, avoid unrelated code churn. Prefer existing helpers and concise analysis.
 
@@ -412,7 +437,7 @@ Risk and budget constitution:
 - Prefer 1x leverage. Never exceed 2x leverage.
 - Do not emit another candidate for the same symbol within 4 hours, and do not enter the same symbol for 24 hours after a stop-out, when that history is known.
 - If daily loss reaches -3% equity, stop opening new trades. If weekly loss reaches -6%, halt and require review.
-- After 3 stop-outs in a row, pause new entries for 24 hours.
+- After 3 stop-outs on one side within 24 hours, pause new entries on that side for 6 hours from the last stop-out.
 - If budget, position count, cooldown, or loss-limit state is unavailable, be conservative and explain the uncertainty in risk_summary.
 - When risk tools are available, use risk_fraction/max_loss_fraction no higher than 0.0075 unless the user explicitly changes the strategy.
 

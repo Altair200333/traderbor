@@ -141,6 +141,9 @@ def place_order_impl(
     fee_rate: float = 0.0,
     as_of: str | int | float | None = None,
     mark_interval: str = "1m",
+    expiresAtMs: int | float | None = None,
+    entryPolicy: str | None = None,
+    entryRefPrice: float | None = None,
 ) -> dict[str, Any]:
     try:
         deterministic_error = _deterministic_place_order_error(
@@ -171,6 +174,9 @@ def place_order_impl(
                 fee_rate=_effective_fee_rate(fee_rate),
                 as_of=guarded_simulation_as_of(as_of),
                 mark_interval=_effective_interval(mark_interval),
+                expiresAtMs=expiresAtMs,
+                entryPolicy=entryPolicy,
+                entryRefPrice=entryRefPrice,
             )
         )
     except Exception as error:

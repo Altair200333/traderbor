@@ -43,6 +43,9 @@ class ExchangeBackend(Protocol):
         fee_rate: float = 0.0,
         as_of: str | int | float | None = None,
         mark_interval: str = "1m",
+        expiresAtMs: int | float | None = None,
+        entryPolicy: str | None = None,
+        entryRefPrice: float | None = None,
     ) -> dict[str, Any]:
         ...
 

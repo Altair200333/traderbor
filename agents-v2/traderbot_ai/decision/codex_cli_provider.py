@@ -71,6 +71,8 @@ class CodexCliMcpDecisionProvider:
                 command,
                 input=prompt,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 capture_output=True,
                 timeout=self._options.timeout_sec,
                 env=env,
@@ -214,6 +216,9 @@ Return only the final JSON object matching the TradeDecision schema.
             "TRADERBOT_EXCHANGE_EXECUTION_INTERVAL",
             "TRADERBOT_SIMULATION_CLOCK_PATH",
             "TRADERBOT_DETERMINISTIC_CANDIDATES",
+            "TRADERBOT_ENTRY_POLICY",
+            "TRADERBOT_RETEST_PULLBACK",
+            "TRADERBOT_RETEST_TTL_MIN",
         ):
             value = os.environ.get(key)
             if value:
@@ -312,20 +317,27 @@ def _context_screener_mode(context: dict[str, Any], default: str) -> str:
 
 def _codex_tool_order_text(screener_mode: str) -> str:
     if screener_mode == "deterministic":
-        return """1. Use the scan table and candidate_primitives from the replay prompt as the only broad screener result.
+        return """1. Use the scan table and candidate list from the replay prompt as the only broad screener result. The screener provides facts only; it does not suggest entry, stop, or take-profit.
 2. Use get_wallet_compact and get_recent_trade_events for risk/cooldown reconstruction when needed.
-3. Use get_setup_digest for at most 2 listed deterministic candidates when extra structure is needed.
-4. Do not call scan_momentum_universe or get_candles; deterministic MCP mode rejects broad/raw market-data bypasses.
-5. Do not call close_position, cancel_order, or settle_exchange; runner-owned settlement and maintenance already ran.
-6. Use validate_order and calculate_position_size before any entry. calculate_position_size.amount is USDT notional; TradeDecision.amount is USDT notional; linear place_order.qty is base-asset quantity, so use qty = notional / current entry price. Do not pass USDT notional as linear qty and do not use marketUnit for linear orders.
-7. Then set_leverage and place_order only for a real long/short decision."""
+3. Use get_setup_digest for at most 2 listed deterministic candidates when extra structure is needed; it returns support/resistance levels (price, touches, age_bars, timeframe, nearest-first), trigger_age_bars, and retest_seen; check them before entry.
+4. Use compute_indicators for standard indicator tables and optional chart artifacts on listed candidates plus BTCUSDT, ETHUSDT, and SOLUSDT context anchors.
+5. Use run_analysis_code for custom bounded calculations only over candles loaded by the tool itself. Do not read raw cache or exchange state files from scratch code.
+6. Use bounded get_candles only when raw rows are still needed; intervals are 1h limit <= 170 or 4h limit <= 60 with exact as_of. Do not use get_candles for broad screening.
+7. Do not call scan_momentum_universe; the runner already did the broad scan.
+8. Do not call close_position, cancel_order, or settle_exchange; runner-owned settlement and maintenance already ran.
+9. If the thesis names marginal/chase/late/extension/stretched/climax/last-hour impulse as the main risk, hold unless the digest reports retest_seen=true and your stop sits outside both structure and typical bar noise.
+10. Choose stop and take-profit yourself from structure and volatility facts (support/resistance levels, ATR, candles you fetch yourself). Place the stop beyond structural invalidation and beyond typical bar noise; enter only if the stop is feasible, risk budget holds, and RR remains >= 1.5. Never tighten a stop to fit risk. retest_seen=false with trigger_age_bars=0 means retest is not possible yet.
+11. Use validate_order and calculate_position_size before any entry. calculate_position_size.amount is USDT notional; TradeDecision.amount is USDT notional; linear place_order.qty is base-asset quantity, so use qty = notional / current entry price. Do not pass USDT notional as linear qty and do not use marketUnit for linear orders.
+12. Then set_leverage and place_order only for a real long/short decision."""
     return """1. Use get_wallet_compact before scanning. Use full get_wallet only if compact output is missing a specific fact needed for an entry or maintenance close.
 2. Use get_recent_trade_events for risk/cooldown reconstruction.
 3. Use scan_momentum_universe once for the broad symbol scan. This replaces raw per-symbol 4h get_candles calls for coarse screening.
 4. Use get_candidate_detail for at most 2 finalists. This replaces raw 1h get_candles calls for deep checks when it returns the needed facts.
-5. Use get_candles only as a fallback for missing screener/detail facts, never as the default broad scan.
-6. Use validate_order and calculate_position_size before any entry. calculate_position_size.amount is USDT notional; TradeDecision.amount is USDT notional; linear place_order.qty is base-asset quantity, so use qty = notional / current entry price. Do not pass USDT notional as linear qty and do not use marketUnit for linear orders.
-7. Then set_leverage and place_order only for a real long/short decision."""
+5. Use compute_indicators for standard indicator tables and optional chart artifacts when screener/detail facts are not enough.
+6. Use run_analysis_code for custom bounded calculations only over candles loaded by the tool itself. Do not read raw cache or exchange state files from scratch code.
+7. Use get_candles only as a fallback for missing screener/detail/indicator facts, never as the default broad scan.
+8. Use validate_order and calculate_position_size before any entry. calculate_position_size.amount is USDT notional; TradeDecision.amount is USDT notional; linear place_order.qty is base-asset quantity, so use qty = notional / current entry price. Do not pass USDT notional as linear qty and do not use marketUnit for linear orders.
+9. Then set_leverage and place_order only for a real long/short decision."""
 
 
 def _clear_step_artifacts(paths: _CodexStepPaths) -> None:
