@@ -216,6 +216,7 @@ Return only the final JSON object matching the TradeDecision schema.
             "TRADERBOT_EXCHANGE_EXECUTION_INTERVAL",
             "TRADERBOT_SIMULATION_CLOCK_PATH",
             "TRADERBOT_DETERMINISTIC_CANDIDATES",
+            "TRADERBOT_DETERMINISTIC_CANDIDATES_PATH",
             "TRADERBOT_ENTRY_POLICY",
             "TRADERBOT_RETEST_PULLBACK",
             "TRADERBOT_RETEST_TTL_MIN",
@@ -325,8 +326,8 @@ def _codex_tool_order_text(screener_mode: str) -> str:
 6. Use bounded get_candles only when raw rows are still needed; intervals are 1h limit <= 170 or 4h limit <= 60 with exact as_of. Do not use get_candles for broad screening.
 7. Do not call scan_momentum_universe; the runner already did the broad scan.
 8. Do not call close_position, cancel_order, or settle_exchange; runner-owned settlement and maintenance already ran.
-9. If the thesis names marginal/chase/late/extension/stretched/climax/last-hour impulse as the main risk, hold unless the digest reports retest_seen=true and your stop sits outside both structure and typical bar noise.
-10. Choose stop and take-profit yourself from structure and volatility facts (support/resistance levels, ATR, candles you fetch yourself). Place the stop beyond structural invalidation and beyond typical bar noise; enter only if the stop is feasible, risk budget holds, and RR remains >= 1.5. Never tighten a stop to fit risk. retest_seen=false with trigger_age_bars=0 means retest is not possible yet.
+9. Deterministic candidates are pre-selected fresh momentum breakouts; extension, last-hour impulse, or high RSI are expected properties of this flow, not veto reasons, and no retest confirmation is required for entry. Hold only for operational reasons: row data warnings, stale/implausible price, drift beyond the runner clamp, documented illiquidity, exhausted risk budget or position slots. On multi-candidate bars open at most the free slots, prefer the more liquid symbol on close calls, and do not pick solely by the largest ROC.
+10. Choose stop and take-profit yourself from structure and volatility facts (support/resistance levels, ATR, candles you fetch yourself). Place the stop beyond structural invalidation and never tighter than the noise% floor from the scan row (the runner rejects tighter stops). Target RR >= 3.0 inside the 24h hold horizon; below RR 2.0 hold. Never tighten a stop to fit risk. retest_seen=false with trigger_age_bars=0 means retest is not possible yet; retest facts inform stop placement, not entry permission. If a market entry is rejected for drift, do not chase: hold or place a pending limit at the scan boundary (orderType "Limit", entryPolicy "limit_retest", entryRefPrice equal to the limit price, expiresAtMs at most 2h after as_of).
 11. Use validate_order and calculate_position_size before any entry. calculate_position_size.amount is USDT notional; TradeDecision.amount is USDT notional; linear place_order.qty is base-asset quantity, so use qty = notional / current entry price. Do not pass USDT notional as linear qty and do not use marketUnit for linear orders.
 12. Then set_leverage and place_order only for a real long/short decision."""
     return """1. Use get_wallet_compact before scanning. Use full get_wallet only if compact output is missing a specific fact needed for an entry or maintenance close.

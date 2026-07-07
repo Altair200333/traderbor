@@ -12,8 +12,8 @@ def to_canonical_json(result: ScanResult) -> str:
 def to_markdown_table(result: ScanResult) -> str:
     lines = [
         f"as_of={result.as_of_iso} config={result.config_hash} btc_roc4h={_pct(result.btc_roc_4h)}",
-        "| sym | side | close | roc4h | roc24h | vol | rsi | atr% | ext | pat | fail/block |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
+        "| sym | side | close | roc4h | roc24h | vol | rsi | atr% | noise% | ext | pat | fail/block |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
     ]
     for row in result.symbols:
         lines.append(_row(row))
@@ -26,9 +26,10 @@ def _row(row: SymbolRow) -> str:
     quality = f":{row.candidate_quality}" if row.candidate_quality else ""
     patterns = ",".join(row.patterns_long if side == "long" else row.patterns_short if side == "short" else row.patterns_long + row.patterns_short) or "-"
     fail = ",".join(row.blocked_by or row.failed_gates or ([row.data_issue.get("reason", row.status)] if row.data_issue else [])) or "-"
+    noise = row.plan.d_noise if row.plan is not None else None
     return (
         f"| {marker}{row.symbol} | {side}{quality} | {_num(row.close)} | {_pct(row.roc_4h)} | {_pct(row.roc_24h)} | "
-        f"{_num(row.vol_ratio, 1)} | {_num(row.rsi, 0)} | {_pct(row.atr_pct)} | {_ext(row.ema20_ext_atr)} | {patterns} | {fail} |"
+        f"{_num(row.vol_ratio, 1)} | {_num(row.rsi, 0)} | {_pct(row.atr_pct)} | {_pct(noise)} | {_ext(row.ema20_ext_atr)} | {patterns} | {fail} |"
     )
 
 

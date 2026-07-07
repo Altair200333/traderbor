@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import tempfile
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -16,6 +17,8 @@ from pydantic import BaseModel
 from traderbot_ai.exchange import SimulatedExchange
 from traderbot_ai.paths import DATA_DIR, ensure_runtime_dirs
 from traderbot_ai.screener import ScreenerConfig, ScreenerStateStore, TradingState, scan as run_screener
+from traderbot_ai.screener import providers as scanner_providers
+from traderbot_ai.screener.providers import resolve_scanner_provider
 from traderbot_ai.screener.artifacts import write_scan_artifacts
 from traderbot_ai.screener.data import load_closed, validate_frame
 from traderbot_ai.screener.maintenance import MaintenanceAction, check_impulse_break, check_max_hold
@@ -55,6 +58,9 @@ class ExchangeReplayConfig:
     entry_policy: str = "next_open"
     retest_pullback: float = 0.4
     retest_ttl_min: int = 120
+    scanner_provider: str = "legacy"
+    decide_first_bar_only: bool = False
+    end_when_flat: bool = False
 
 
 def build_exchange_replay_config(
@@ -75,6 +81,9 @@ def build_exchange_replay_config(
     entry_policy: str = "next_open",
     retest_pullback: float = 0.4,
     retest_ttl_min: int = 120,
+    scanner_provider: str | None = None,
+    decide_first_bar_only: bool = False,
+    end_when_flat: bool = False,
 ) -> ExchangeReplayConfig:
     normalized_symbols = tuple(normalize_symbol(symbol) for symbol in _split_symbols(symbols))
     if not normalized_symbols:
@@ -95,6 +104,8 @@ def build_exchange_replay_config(
         raise ValueError("deterministic screener replay requires decision_interval=1h")
     if screener_mode == "deterministic":
         _validate_deterministic_replay_timing(start_ms, end_ms, decision_interval)
+    if decide_first_bar_only and screener_mode != "deterministic":
+        raise ValueError("decide_first_bar_only requires screener_mode=deterministic")
     if entry_policy not in {"next_open", "limit_retest"}:
         raise ValueError("entry_policy must be next_open or limit_retest")
     if entry_policy == "limit_retest" and screener_mode != "deterministic":
@@ -132,7 +143,19 @@ def build_exchange_replay_config(
         entry_policy=entry_policy,
         retest_pullback=retest_pullback_value,
         retest_ttl_min=retest_ttl_value,
+        scanner_provider=resolve_scanner_provider(scanner_provider),
+        decide_first_bar_only=bool(decide_first_bar_only),
+        end_when_flat=bool(end_when_flat),
     )
+
+
+def _wallet_flat(wallet: dict[str, Any]) -> bool:
+    """No open positions and no active (fillable) orders left."""
+    if wallet.get("open_positions"):
+        return False
+    active = [order for order in (wallet.get("open_orders") or [])
+              if str(order.get("status", "")).lower() in {"new", "partiallyfilled"}]
+    return not active
 
 
 def run_exchange_replay(
@@ -197,7 +220,10 @@ def run_exchange_replay(
                     maintenance_exchange_events = _read_jsonl_since(exchange.events_path, maintenance_cursor)
                     if maintenance_actions:
                         wallet_before = exchange.wallet_summary(symbols=list(config.symbols), as_of=as_of_ms, mark_interval=config.execution_interval)
-                scan_context = _build_deterministic_scan_context(config, cache, wallet_before, as_of_ms, screener_cfg, screener_state) if config.screener_mode == "deterministic" else {}
+                # first-bar-only sessions skip later scans entirely: no candidates -> auto-hold,
+                # the remaining steps are settlement/maintenance stepping until flat
+                run_scan = config.screener_mode == "deterministic" and not (config.decide_first_bar_only and as_of_ms > config.start_ms)
+                scan_context = _build_deterministic_scan_context(config, cache, wallet_before, as_of_ms, screener_cfg, screener_state) if run_scan else {}
                 context = {
                     "run_id": config.run_id,
                     "symbols": list(config.symbols),
@@ -252,6 +278,8 @@ def run_exchange_replay(
                 steps.append(step)
                 _append_replay_event(replay_path, "step_completed", step)
                 as_of_ms += step_ms
+                if config.end_when_flat and _wallet_flat(wallet_after):
+                    break
 
             set_simulation_clock_state(config.end_ms)
             final_settlement = exchange.settle(as_of=config.end_ms, interval=config.execution_interval, fee_rate=config.fee_rate)
@@ -362,13 +390,22 @@ def _build_deterministic_scan_context(
         last_candidate_ts=screener_state.last_candidate_ts,
         last_candidate_quality=screener_state.last_candidate_quality,
     )
-    result = run_screener(
-        symbols=list(config.symbols),
-        as_of_ms=as_of_ms,
-        cfg=screener_cfg,
-        state=state,
-        cache_path=cache.path,
-    )
+    if config.scanner_provider == "v2":
+        result = scanner_providers.scan_v2(
+            symbols=list(config.symbols),
+            as_of_ms=as_of_ms,
+            cfg=screener_cfg,
+            state=state,
+            cache_path=cache.path,
+        )
+    else:
+        result = run_screener(
+            symbols=list(config.symbols),
+            as_of_ms=as_of_ms,
+            cfg=screener_cfg,
+            state=state,
+            cache_path=cache.path,
+        )
     artifacts = write_scan_artifacts(result, config.run_id)
     rows = [row.model_dump(mode="json") for row in result.symbols]
     screener_state.update_from_scan_rows(rows, as_of_ms)
@@ -400,6 +437,8 @@ def _build_deterministic_scan_context(
     ]
     return {
         "screener_mode": "deterministic",
+        "scanner_provider": config.scanner_provider,
+        "scanner_version": result.screener_version,
         "scan_markdown": to_markdown_table(result),
         "scan_artifact_path": artifacts["artifact_path"],
         "scan_hash": artifacts["sha256"],
@@ -497,6 +536,8 @@ def _compact_scan_context(context: dict[str, Any]) -> dict[str, Any] | None:
         return None
     return {
         "screener_mode": context.get("screener_mode"),
+        "scanner_provider": context.get("scanner_provider"),
+        "scanner_version": context.get("scanner_version"),
         "scan_artifact_path": context.get("scan_artifact_path"),
         "scan_hash": context.get("scan_hash"),
         "candidates": context.get("screener_candidates", []),
@@ -522,10 +563,16 @@ def _allowed_entry_candidates(context: dict[str, Any]) -> set[tuple[str, str]]:
     return allowed
 
 
+# inline env payload cap: candidates travel to the codex-side MCP server via
+# -c command-line args, and Windows cmd lines break near 8k chars on hot bars
+_INLINE_CANDIDATES_MAX_CHARS = 2000
+
+
 @contextmanager
 def _deterministic_candidate_allowlist_env(context: dict[str, Any]) -> Iterator[None]:
     old_mode = os.environ.get("TRADERBOT_SCREENER_MODE")
     old_candidates = os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES")
+    old_candidates_path = os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES_PATH")
     max_drift = context.get("max_entry_drift_pct")
     payload = []
     for item in context.get("candidate_primitives") or []:
@@ -536,14 +583,28 @@ def _deterministic_candidate_allowlist_env(context: dict[str, Any]) -> Iterator[
         if plan.get("ref_entry") is not None and max_drift is not None:
             entry["ref_price"] = plan.get("ref_entry")
             entry["max_drift_pct"] = max_drift
+        if plan.get("d_noise") is not None:
+            entry["noise_floor_pct"] = plan.get("d_noise")
         payload.append(entry)
     os.environ["TRADERBOT_SCREENER_MODE"] = "deterministic"
-    os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"] = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    payload_json = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    payload_file: Path | None = None
+    if len(payload_json) <= _INLINE_CANDIDATES_MAX_CHARS:
+        os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"] = payload_json
+        os.environ.pop("TRADERBOT_DETERMINISTIC_CANDIDATES_PATH", None)
+    else:
+        payload_file = Path(tempfile.gettempdir()) / f"traderbot-candidates-{os.getpid()}-{context.get('as_of_ms')}.json"
+        payload_file.write_text(payload_json, encoding="utf-8")
+        os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES_PATH"] = str(payload_file)
+        os.environ.pop("TRADERBOT_DETERMINISTIC_CANDIDATES", None)
     try:
         yield
     finally:
         _restore_env("TRADERBOT_SCREENER_MODE", old_mode)
         _restore_env("TRADERBOT_DETERMINISTIC_CANDIDATES", old_candidates)
+        _restore_env("TRADERBOT_DETERMINISTIC_CANDIDATES_PATH", old_candidates_path)
+        if payload_file is not None:
+            payload_file.unlink(missing_ok=True)
 
 
 def _restore_env(name: str, value: str | None) -> None:

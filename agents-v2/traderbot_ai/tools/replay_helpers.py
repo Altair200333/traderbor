@@ -183,7 +183,7 @@ def _read_exchange_events() -> list[dict[str, Any]]:
 def _deterministic_candidate_error(symbol: str, side: str) -> dict[str, Any] | None:
     if os.getenv("TRADERBOT_SCREENER_MODE") != "deterministic":
         return None
-    raw = os.getenv("TRADERBOT_DETERMINISTIC_CANDIDATES")
+    raw = _deterministic_candidates_json()
     if not raw:
         return {
             "ok": False,
@@ -219,13 +219,28 @@ def _deterministic_candidate_error(symbol: str, side: str) -> dict[str, Any] | N
     }
 
 
+def _deterministic_candidates_json() -> str | None:
+    """Candidate payload: inline env var for small sets, file indirection for hot bars
+    (Windows command lines cap out near 8k chars; codex passes env via -c arguments)."""
+    raw = os.getenv("TRADERBOT_DETERMINISTIC_CANDIDATES")
+    if raw:
+        return raw
+    path = os.getenv("TRADERBOT_DETERMINISTIC_CANDIDATES_PATH")
+    if not path:
+        return None
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except Exception:
+        return None
+
+
 def deterministic_entry_drift_error(symbol: str, side: str, entry_price: float | None) -> dict[str, Any] | None:
     """Reject entries whose price drifted adversely from the scan reference (anti-chase clamp)."""
     if os.getenv("TRADERBOT_SCREENER_MODE") != "deterministic":
         return None
     if entry_price is None or float(entry_price) <= 0:
         return None
-    raw = os.getenv("TRADERBOT_DETERMINISTIC_CANDIDATES")
+    raw = _deterministic_candidates_json()
     if not raw:
         return None
     try:
@@ -267,6 +282,58 @@ def deterministic_entry_drift_error(symbol: str, side: str, entry_price: float |
             "ref_price": ref,
             "entry_price": float(entry_price),
             "entry_drift_pct": drift,
+        }
+    return None
+
+
+def deterministic_stop_noise_error(symbol: str, side: str, entry_price: float | None, stop_loss: float | None) -> dict[str, Any] | None:
+    """Reject entries whose stop sits inside the scan's measured noise floor (guaranteed noise stop-out)."""
+    if os.getenv("TRADERBOT_SCREENER_MODE") != "deterministic":
+        return None
+    if entry_price is None or float(entry_price) <= 0:
+        return None
+    if stop_loss is None or float(stop_loss) <= 0:
+        return None
+    raw = _deterministic_candidates_json()
+    if not raw:
+        return None
+    try:
+        items = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(items, list):
+        return None
+    try:
+        normalized = normalize_symbol(symbol)
+    except Exception:
+        return None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            item_symbol = normalize_symbol(str(item.get("symbol") or ""))
+        except Exception:
+            continue
+        if item_symbol != normalized or str(item.get("side") or "") != side:
+            continue
+        floor = item.get("noise_floor_pct")
+        if floor is None or float(floor) <= 0:
+            return None
+        entry = float(entry_price)
+        distance = (entry - float(stop_loss)) / entry if side == "long" else (float(stop_loss) - entry) / entry
+        if distance <= 0:
+            # inverted geometry is rejected by risk validation, not here
+            return None
+        if distance >= float(floor):
+            return None
+        return {
+            "ok": False,
+            "symbol": normalized,
+            "side": side,
+            "screener_mode": "deterministic",
+            "error": f"stop distance {distance:.4%} is inside the measured noise floor {float(floor):.4%}; widen the stop beyond noise or hold",
+            "stop_distance_pct": distance,
+            "noise_floor_pct": float(floor),
         }
     return None
 
@@ -343,7 +410,7 @@ def _deterministic_exact_as_of(as_of: str | int | float | None, tool_name: str) 
 
 def _deterministic_deep_dive_symbols() -> set[str]:
     allowed = {normalize_symbol(symbol) for symbol in DETERMINISTIC_DEEP_DIVE_ANCHORS}
-    raw = os.getenv("TRADERBOT_DETERMINISTIC_CANDIDATES")
+    raw = _deterministic_candidates_json()
     if not raw:
         return allowed
     try:

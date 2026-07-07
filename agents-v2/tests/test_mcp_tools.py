@@ -371,6 +371,77 @@ class McpToolTests(unittest.TestCase):
         event_types = [json.loads(line)["type"] for line in event_text.splitlines()]
         self.assertNotIn("place_order", event_types)
 
+    def test_deterministic_stop_noise_error_unit(self) -> None:
+        from traderbot_ai.tools import replay_helpers
+
+        old_mode = os.environ.get("TRADERBOT_SCREENER_MODE")
+        old_candidates = os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES")
+        try:
+            os.environ["TRADERBOT_SCREENER_MODE"] = "deterministic"
+            os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"] = json.dumps(
+                [
+                    {"symbol": BTC, "side": "long", "ref_price": 100.0, "max_drift_pct": 0.02, "noise_floor_pct": 0.02},
+                    {"symbol": "ETHUSDT", "side": "short", "ref_price": 100.0, "max_drift_pct": 0.02, "noise_floor_pct": 0.02},
+                ]
+            )
+
+            inside_long = replay_helpers.deterministic_stop_noise_error(BTC, "long", 100.0, 99.0)
+            outside_long = replay_helpers.deterministic_stop_noise_error(BTC, "long", 100.0, 97.5)
+            inside_short = replay_helpers.deterministic_stop_noise_error("ETHUSDT", "short", 100.0, 101.0)
+            outside_short = replay_helpers.deterministic_stop_noise_error("ETHUSDT", "short", 100.0, 102.5)
+            no_stop = replay_helpers.deterministic_stop_noise_error(BTC, "long", 100.0, None)
+            unknown_symbol = replay_helpers.deterministic_stop_noise_error("SOLUSDT", "long", 100.0, 99.0)
+
+            os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"] = json.dumps(
+                [{"symbol": BTC, "side": "long", "ref_price": 100.0, "max_drift_pct": 0.02}]
+            )
+            no_floor = replay_helpers.deterministic_stop_noise_error(BTC, "long", 100.0, 99.0)
+        finally:
+            _restore_env("TRADERBOT_SCREENER_MODE", old_mode)
+            _restore_env("TRADERBOT_DETERMINISTIC_CANDIDATES", old_candidates)
+
+        self.assertIsNotNone(inside_long)
+        self.assertFalse(inside_long["ok"])
+        self.assertIn("noise floor", inside_long["error"])
+        self.assertAlmostEqual(inside_long["noise_floor_pct"], 0.02)
+        self.assertIsNone(outside_long)
+        self.assertIsNotNone(inside_short)
+        self.assertFalse(inside_short["ok"])
+        self.assertIsNone(outside_short)
+        self.assertIsNone(no_stop)
+        self.assertIsNone(unknown_symbol)
+        self.assertIsNone(no_floor)
+
+    def test_deterministic_candidates_file_indirection(self) -> None:
+        import tempfile
+
+        from traderbot_ai.tools import replay_helpers
+
+        old_mode = os.environ.get("TRADERBOT_SCREENER_MODE")
+        old_candidates = os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES")
+        old_path = os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES_PATH")
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                payload_file = Path(tmp) / "candidates.json"
+                payload_file.write_text(json.dumps(
+                    [{"symbol": BTC, "side": "long", "ref_price": 100.0, "max_drift_pct": 0.02, "noise_floor_pct": 0.02}]
+                ), encoding="utf-8")
+                os.environ["TRADERBOT_SCREENER_MODE"] = "deterministic"
+                os.environ.pop("TRADERBOT_DETERMINISTIC_CANDIDATES", None)
+                os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES_PATH"] = str(payload_file)
+
+                adverse = replay_helpers.deterministic_entry_drift_error(BTC, "long", 103.0)
+                stop_inside = replay_helpers.deterministic_stop_noise_error(BTC, "long", 100.0, 99.0)
+        finally:
+            _restore_env("TRADERBOT_SCREENER_MODE", old_mode)
+            _restore_env("TRADERBOT_DETERMINISTIC_CANDIDATES", old_candidates)
+            _restore_env("TRADERBOT_DETERMINISTIC_CANDIDATES_PATH", old_path)
+
+        self.assertIsNotNone(adverse)
+        self.assertIn("drifted", adverse["error"])
+        self.assertIsNotNone(stop_inside)
+        self.assertIn("noise floor", stop_inside["error"])
+
     def test_deterministic_entry_drift_error_unit(self) -> None:
         from traderbot_ai.tools import replay_helpers
 

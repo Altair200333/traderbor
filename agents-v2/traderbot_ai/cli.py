@@ -203,6 +203,9 @@ def cmd_exchange_replay(args: argparse.Namespace) -> None:
         entry_policy=args.entry_policy,
         retest_pullback=args.retest_pullback,
         retest_ttl_min=args.retest_ttl_min,
+        scanner_provider=args.scanner_provider,
+        decide_first_bar_only=args.decide_first_bar_only,
+        end_when_flat=args.end_when_flat,
     )
     provider_name = args.decision_provider or ("hold" if args.decision_mode == "hold" else "openai-agents")
     if args.decision_mode == "hold" and provider_name != "hold":
@@ -247,6 +250,30 @@ def cmd_exchange_replay(args: argparse.Namespace) -> None:
         _dump(run_exchange_replay(config=config, decide=provider.decide))
     finally:
         provider.close()
+
+
+def cmd_exchange_replay_parallel(args: argparse.Namespace) -> None:
+    from traderbot_ai.simulator.parallel_replay import run_parallel_candidate_replay
+
+    _dump(run_parallel_candidate_replay(
+        symbols=args.symbols,
+        start_time=args.start_time,
+        end_time=args.end_time,
+        execution_interval=args.execution_interval,
+        balance_usdt=args.balance_usdt,
+        fee_rate=args.fee_rate,
+        scanner_provider=args.scanner_provider,
+        concurrency=args.concurrency,
+        session_horizon_hours=args.session_horizon_hours,
+        run_id=args.run_id,
+        out_dir=args.out_dir,
+        phase1_replay=args.phase1_replay,
+        codex_model=args.codex_model,
+        codex_reasoning_effort=args.codex_reasoning_effort,
+        codex_timeout_sec=args.codex_timeout_sec,
+        codex_output_dir=args.codex_output_dir,
+        codex_fail_open=args.codex_fail_open,
+    ))
 
 
 def cmd_replay_report(args: argparse.Namespace) -> None:
@@ -387,9 +414,12 @@ def build_parser() -> argparse.ArgumentParser:
     exchange_replay.add_argument("--decision-mode", choices=["agent", "hold"], default="agent", help="Compatibility alias. Use --decision-provider for new runs.")
     exchange_replay.add_argument("--decision-provider", choices=["openai-agents", "codex-cli-mcp", "hold"], help="Decision provider for replay.")
     exchange_replay.add_argument("--screener-mode", choices=["off", "deterministic", "legacy-self-screen"], default="off", help="Deterministic runner-owned screener mode. Default preserves legacy provider-side screening.")
+    exchange_replay.add_argument("--scanner-provider", choices=["legacy", "v2"], default=None, help="Scanner backing the deterministic screener: legacy S1-S11 stack or scanner-v2 (long-only P1 + ML score). Default: TRADERBOT_SCANNER_PROVIDER env or legacy.")
     exchange_replay.add_argument("--entry-policy", choices=["next_open", "limit_retest"], default="next_open", help="Runner-owned entry policy (limit_retest requires --screener-mode deterministic).")
     exchange_replay.add_argument("--retest-pullback", type=float, default=0.4)
     exchange_replay.add_argument("--retest-ttl-min", type=int, default=120)
+    exchange_replay.add_argument("--decide-first-bar-only", action="store_true", help="Call the decision provider on the first bar only; later bars skip scanning and auto-hold (isolated candidate-session mode).")
+    exchange_replay.add_argument("--end-when-flat", action="store_true", help="End the replay after any step that leaves no open positions and no active orders.")
     exchange_replay.add_argument("--codex-model", help="Model for --decision-provider codex-cli-mcp. If omitted, Codex CLI chooses its configured/default model.")
     exchange_replay.add_argument("--codex-reasoning-effort", choices=["low", "medium", "high", "xhigh"], help="Codex model_reasoning_effort config override.")
     exchange_replay.add_argument("--codex-profile", help="Codex config profile for --decision-provider codex-cli-mcp.")
@@ -408,6 +438,26 @@ def build_parser() -> argparse.ArgumentParser:
     exchange_replay.add_argument("--agg-trades", action="store_true", help="Also preload aggregate trades for the requested time range.")
     exchange_replay.add_argument("--max-agg-trades-per-symbol", type=int)
     exchange_replay.set_defaults(func=cmd_exchange_replay)
+
+    parallel = sub.add_parser("exchange-replay-parallel", help="Two-phase replay: a hold scan pass finds candidate bars, then isolated per-bar codex sessions run concurrently; aggregates per-opportunity PnL.")
+    parallel.add_argument("--symbols", required=True)
+    parallel.add_argument("--start-time", required=True)
+    parallel.add_argument("--end-time", required=True)
+    parallel.add_argument("--execution-interval", default="1m")
+    parallel.add_argument("--balance-usdt", type=float, default=1000.0, help="Budget per isolated session.")
+    parallel.add_argument("--fee-rate", type=float, default=0.0)
+    parallel.add_argument("--scanner-provider", choices=["legacy", "v2"], default=None)
+    parallel.add_argument("--concurrency", type=int, default=5, help="Max concurrent codex sessions.")
+    parallel.add_argument("--session-horizon-hours", type=int, default=30, help="Per-session window: entry TTL + 24h max-hold + buffer.")
+    parallel.add_argument("--run-id", help="Base run id; defaults to par-<start>-<end>.")
+    parallel.add_argument("--out-dir", type=Path, default=None, help="Artifacts directory (default: data/parallel/<run-id>).")
+    parallel.add_argument("--phase1-replay", type=Path, default=None, help="Reuse an existing replay JSONL for candidate discovery instead of running the hold pass.")
+    parallel.add_argument("--codex-model")
+    parallel.add_argument("--codex-reasoning-effort", choices=["low", "medium", "high", "xhigh"])
+    parallel.add_argument("--codex-timeout-sec", type=int, default=1800)
+    parallel.add_argument("--codex-output-dir", type=Path, default=None)
+    parallel.add_argument("--codex-fail-open", choices=["error", "hold"], default="error")
+    parallel.set_defaults(func=cmd_exchange_replay_parallel)
 
     replay_report = sub.add_parser("replay-report", help="Inspect an exchange replay JSONL log.")
     replay_report.add_argument("--replay-path", required=True)

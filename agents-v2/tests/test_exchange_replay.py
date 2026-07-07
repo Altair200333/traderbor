@@ -1263,5 +1263,147 @@ def _scan_result(rows: list[SymbolRow], candidates: list[str]) -> ScanResult:
     )
 
 
+class FirstBarOnlySessionTests(unittest.TestCase):
+    def _candidate_scan_result(self):
+        row = SymbolRow(
+            symbol=BTC,
+            status="ok",
+            close=100.0,
+            signal_candidate_before_state="long",
+            candidate="long",
+            plan=PlanPrimitives(
+                pattern_used="P1",
+                boundary_price=99.0,
+                invalidation_price=98.4,
+                d_atr=0.02,
+                d_struct=0.016,
+                d_final=0.02,
+                stop_feasible=True,
+                tp_rr_default=2.5,
+                ref_entry=100.0,
+            ),
+        )
+        return _scan_result([row], candidates=[BTC])
+
+    def test_decide_first_bar_only_calls_provider_and_scan_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = LocalMarketCache(Path(tmp) / "market.sqlite3")
+            for hour in range(4):
+                cache.upsert_candles([candle_at_close(BTC, BASE_MS + hour * ONE_HOUR_MS, 50_000.0, 50_100.0, 49_900.0, 50_000.0)])
+            config = build_exchange_replay_config(
+                symbols=[BTC],
+                start_time=BASE_MS,
+                end_time=BASE_MS + 3 * ONE_HOUR_MS,
+                decision_interval="1h",
+                state_path=Path(tmp) / "exchange.json",
+                events_path=Path(tmp) / "exchange-events.jsonl",
+                replay_path=Path(tmp) / "replay.jsonl",
+                screener_mode="deterministic",
+                run_id="first-bar-only",
+                decide_first_bar_only=True,
+            )
+            decide_calls: list[int] = []
+
+            def decide(context: dict) -> dict:
+                decide_calls.append(context["as_of_ms"])
+                return {"final_decision": "hold", "symbol": BTC, "amount": 0.0}
+
+            with patch("traderbot_ai.simulator.exchange_replay.run_screener", return_value=self._candidate_scan_result()) as scan_mock, patch(
+                "traderbot_ai.simulator.exchange_replay.write_scan_artifacts",
+                return_value={"artifact_path": str(Path(tmp) / "scan.json"), "sha256": "hash"},
+            ):
+                result = run_exchange_replay(config=config, decide=decide, cache=cache)
+
+        self.assertEqual(decide_calls, [BASE_MS])
+        self.assertEqual(scan_mock.call_count, 1)
+        self.assertEqual(len(result["steps"]), 3)
+        for later_step in result["steps"][1:]:
+            self.assertEqual(later_step["decision"]["final_decision"], "hold")
+            self.assertEqual((later_step["scan"] or {}).get("candidates") or [], [])
+
+    def test_end_when_flat_stops_after_first_flat_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = LocalMarketCache(Path(tmp) / "market.sqlite3")
+            for hour in range(6):
+                cache.upsert_candles([candle_at_close(BTC, BASE_MS + hour * ONE_HOUR_MS, 50_000.0, 50_100.0, 49_900.0, 50_000.0)])
+            config = build_exchange_replay_config(
+                symbols=[BTC],
+                start_time=BASE_MS,
+                end_time=BASE_MS + 5 * ONE_HOUR_MS,
+                decision_interval="1h",
+                state_path=Path(tmp) / "exchange.json",
+                events_path=Path(tmp) / "exchange-events.jsonl",
+                replay_path=Path(tmp) / "replay.jsonl",
+                screener_mode="deterministic",
+                run_id="end-when-flat",
+                decide_first_bar_only=True,
+                end_when_flat=True,
+            )
+
+            def decide(context: dict) -> dict:
+                return {"final_decision": "hold", "symbol": BTC, "amount": 0.0}
+
+            with patch("traderbot_ai.simulator.exchange_replay.run_screener", return_value=self._candidate_scan_result()), patch(
+                "traderbot_ai.simulator.exchange_replay.write_scan_artifacts",
+                return_value={"artifact_path": str(Path(tmp) / "scan.json"), "sha256": "hash"},
+            ):
+                result = run_exchange_replay(config=config, decide=decide, cache=cache)
+
+        self.assertEqual(len(result["steps"]), 1)
+        self.assertTrue(result["ok"])
+
+    def test_decide_first_bar_only_requires_deterministic_mode(self) -> None:
+        with self.assertRaisesRegex(ValueError, "decide_first_bar_only"):
+            build_exchange_replay_config(
+                symbols=[BTC],
+                start_time=BASE_MS,
+                end_time=BASE_MS + ONE_HOUR_MS,
+                decision_interval="1h",
+                screener_mode="off",
+                decide_first_bar_only=True,
+            )
+
+
+class DeterministicAllowlistEnvTests(unittest.TestCase):
+    def test_allowlist_env_carries_ref_drift_and_noise_floor(self) -> None:
+        from traderbot_ai.simulator.exchange_replay import _deterministic_candidate_allowlist_env
+
+        context = {
+            "candidate_primitives": [
+                {"symbol": "BTCUSDT", "side": "long", "plan": {"ref_entry": 100.0, "d_noise": 0.02}},
+                {"symbol": "ETHUSDT", "side": "long", "plan": {"ref_entry": 50.0}},
+            ],
+            "max_entry_drift_pct": 0.02,
+        }
+        with _deterministic_candidate_allowlist_env(context):
+            payload = json.loads(os.environ["TRADERBOT_DETERMINISTIC_CANDIDATES"])
+        self.assertEqual(
+            payload,
+            [
+                {"symbol": "BTCUSDT", "side": "long", "ref_price": 100.0, "max_drift_pct": 0.02, "noise_floor_pct": 0.02},
+                {"symbol": "ETHUSDT", "side": "long", "ref_price": 50.0, "max_drift_pct": 0.02},
+            ],
+        )
+
+    def test_allowlist_env_switches_to_file_for_large_payloads(self) -> None:
+        from traderbot_ai.simulator.exchange_replay import _deterministic_candidate_allowlist_env
+
+        primitives = [
+            {"symbol": f"SYM{index}USDT", "side": "long", "plan": {"ref_entry": 100.0 + index, "d_noise": 0.02}}
+            for index in range(40)
+        ]
+        context = {"candidate_primitives": primitives, "max_entry_drift_pct": 0.02, "as_of_ms": BASE_MS}
+        with _deterministic_candidate_allowlist_env(context):
+            self.assertIsNone(os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES"))
+            path_value = os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES_PATH")
+            self.assertIsNotNone(path_value)
+            payload_file = Path(path_value)
+            payload = json.loads(payload_file.read_text(encoding="utf-8"))
+            self.assertEqual(len(payload), 40)
+            self.assertEqual(payload[0]["noise_floor_pct"], 0.02)
+        self.assertFalse(payload_file.exists())
+        self.assertIsNone(os.environ.get("TRADERBOT_DETERMINISTIC_CANDIDATES_PATH"))
+
+
 if __name__ == "__main__":
     unittest.main()

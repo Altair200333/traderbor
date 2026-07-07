@@ -490,6 +490,16 @@ def _deterministic_place_order_error(inputs: dict[str, Any]) -> dict[str, Any] |
         result = dict(drift_error)
         result["tool"] = "place_order"
         return result
+    stop_noise_error = replay_helpers.deterministic_stop_noise_error(
+        str(inputs.get("symbol") or ""),
+        candidate_side,
+        _entry_price_for_order(inputs),
+        inputs.get("stopLoss"),
+    )
+    if stop_noise_error is not None:
+        result = dict(stop_noise_error)
+        result["tool"] = "place_order"
+        return result
     return None
 
 
