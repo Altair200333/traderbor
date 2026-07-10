@@ -13,7 +13,7 @@ from agents import Runner
 
 from traderbot_ai.agents.trading import build_tools, build_trading_agent
 from traderbot_ai.config import load_settings
-from traderbot_ai.decision import CodexCliMcpDecisionProvider, CodexCliOptions, HoldDecisionProvider, OpenAIAgentsDecisionProvider
+from traderbot_ai.decision import CodexCliMcpDecisionProvider, CodexCliOptions, HoldDecisionProvider, OpenAIAgentsDecisionProvider, TakeAllDecisionProvider
 from traderbot_ai.decision.serialization import jsonable
 from traderbot_ai.providers import provider_status
 from traderbot_ai.runtime.run_store import write_run_record
@@ -213,6 +213,11 @@ def cmd_exchange_replay(args: argparse.Namespace) -> None:
         return
     if provider_name == "hold":
         provider = HoldDecisionProvider()
+    elif provider_name == "take-all":
+        if config.screener_mode != "deterministic":
+            _dump({"ok": False, "error": "take-all provider requires --screener-mode deterministic"})
+            return
+        provider = TakeAllDecisionProvider()
     elif provider_name == "openai-agents":
         settings = replace(load_settings(), market_data_mode="cache", enable_codex_tool=False)
         session_name = args.session or f"{config.run_id}-agent"
@@ -263,6 +268,7 @@ def cmd_exchange_replay_parallel(args: argparse.Namespace) -> None:
         balance_usdt=args.balance_usdt,
         fee_rate=args.fee_rate,
         scanner_provider=args.scanner_provider,
+        decision_provider=args.decision_provider,
         concurrency=args.concurrency,
         session_horizon_hours=args.session_horizon_hours,
         run_id=args.run_id,
@@ -412,9 +418,9 @@ def build_parser() -> argparse.ArgumentParser:
     exchange_replay.add_argument("--session")
     exchange_replay.add_argument("--max-turns", type=int, default=12)
     exchange_replay.add_argument("--decision-mode", choices=["agent", "hold"], default="agent", help="Compatibility alias. Use --decision-provider for new runs.")
-    exchange_replay.add_argument("--decision-provider", choices=["openai-agents", "codex-cli-mcp", "hold"], help="Decision provider for replay.")
+    exchange_replay.add_argument("--decision-provider", choices=["openai-agents", "codex-cli-mcp", "hold", "take-all"], help="Decision provider for replay.")
     exchange_replay.add_argument("--screener-mode", choices=["off", "deterministic", "legacy-self-screen"], default="off", help="Deterministic runner-owned screener mode. Default preserves legacy provider-side screening.")
-    exchange_replay.add_argument("--scanner-provider", choices=["legacy", "v2"], default=None, help="Scanner backing the deterministic screener: legacy S1-S11 stack or scanner-v2 (long-only P1 + ML score). Default: TRADERBOT_SCANNER_PROVIDER env or legacy.")
+    exchange_replay.add_argument("--scanner-provider", choices=["legacy", "v2", "v3-file"], default=None, help="Scanner backing the deterministic screener: legacy S1-S11 stack, scanner-v2 (long-only P1 + ML score), or v3-file (precomputed pings parquet via TRADERBOT_SCANNER_V3_PINGS). Default: TRADERBOT_SCANNER_PROVIDER env or legacy.")
     exchange_replay.add_argument("--entry-policy", choices=["next_open", "limit_retest"], default="next_open", help="Runner-owned entry policy (limit_retest requires --screener-mode deterministic).")
     exchange_replay.add_argument("--retest-pullback", type=float, default=0.4)
     exchange_replay.add_argument("--retest-ttl-min", type=int, default=120)
@@ -446,7 +452,8 @@ def build_parser() -> argparse.ArgumentParser:
     parallel.add_argument("--execution-interval", default="1m")
     parallel.add_argument("--balance-usdt", type=float, default=1000.0, help="Budget per isolated session.")
     parallel.add_argument("--fee-rate", type=float, default=0.0)
-    parallel.add_argument("--scanner-provider", choices=["legacy", "v2"], default=None)
+    parallel.add_argument("--scanner-provider", choices=["legacy", "v2", "v3-file"], default=None)
+    parallel.add_argument("--decision-provider", choices=["codex-cli-mcp", "take-all"], default="codex-cli-mcp", help="Per-session decision provider: codex agent or the take-all baseline robot.")
     parallel.add_argument("--concurrency", type=int, default=5, help="Max concurrent codex sessions.")
     parallel.add_argument("--session-horizon-hours", type=int, default=30, help="Per-session window: entry TTL + 24h max-hold + buffer.")
     parallel.add_argument("--run-id", help="Base run id; defaults to par-<start>-<end>.")

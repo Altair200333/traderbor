@@ -216,7 +216,7 @@ def run_exchange_replay(
                 maintenance_warnings: list[str] = []
                 maintenance_exchange_events: list[dict[str, Any]] = []
                 if config.screener_mode == "deterministic":
-                    maintenance_actions, maintenance_warnings = _apply_runner_maintenance(exchange, cache, wallet_before, as_of_ms, config.fee_rate, screener_cfg)
+                    maintenance_actions, maintenance_warnings = _apply_runner_maintenance(exchange, cache, wallet_before, as_of_ms, config.fee_rate, screener_cfg, execution_interval=config.execution_interval)
                     maintenance_exchange_events = _read_jsonl_since(exchange.events_path, maintenance_cursor)
                     if maintenance_actions:
                         wallet_before = exchange.wallet_summary(symbols=list(config.symbols), as_of=as_of_ms, mark_interval=config.execution_interval)
@@ -398,6 +398,13 @@ def _build_deterministic_scan_context(
             state=state,
             cache_path=cache.path,
         )
+    elif config.scanner_provider == "v3-file":
+        result = scanner_providers.scan_v3_file(
+            symbols=list(config.symbols),
+            as_of_ms=as_of_ms,
+            cfg=screener_cfg,
+            state=state,
+        )
     else:
         result = run_screener(
             symbols=list(config.symbols),
@@ -461,6 +468,7 @@ def _apply_runner_maintenance(
     as_of_ms: int,
     fee_rate: float,
     screener_cfg: ScreenerConfig,
+    execution_interval: str = "1m",
 ) -> tuple[list[dict[str, Any]], list[str]]:
     actions = []
     warnings = []
@@ -493,7 +501,7 @@ def _apply_runner_maintenance(
             position_id=position.get("position_id"),
             symbol=position.get("symbol"),
             as_of=as_of_ms,
-            mark_interval="1m",
+            mark_interval=execution_interval,
             fee_rate=fee_rate,
         )
         actions.append({**action.model_dump(mode="json"), "closed_position": closed.get("closed_position")})
@@ -642,9 +650,25 @@ def _validate_decision_exchange_consistency(
                 candidate_key = ("", final_decision)
             if candidate_key not in allowed_entry_candidates:
                 raise RuntimeError(f"{final_decision} decision is not in deterministic screener candidates")
-        if len(place_order_events) != 1:
+        if not place_order_events:
             raise RuntimeError(f"{final_decision} decision did not produce a place_order exchange event")
-        if not _place_order_event_matches_decision(place_order_events[0], decision, final_decision, expected_entry_policy=expected_entry_policy):
+        # multi-entry bars are allowed (slot-filling on hot bars): the decision reflects
+        # the primary entry, but every order must still target an allowed candidate
+        if allowed_entry_candidates is not None:
+            for event in place_order_events:
+                raw_event_payload = event.get("payload")
+                event_payload: dict[str, Any] = raw_event_payload if isinstance(raw_event_payload, dict) else {}
+                event_side = "long" if str(event_payload.get("side", "")).lower() == "buy" else "short"
+                try:
+                    event_key = (normalize_symbol(str(event_payload.get("symbol") or "")), event_side)
+                except Exception:
+                    event_key = ("", event_side)
+                if event_key not in allowed_entry_candidates:
+                    raise RuntimeError(f"place_order event targets a non-candidate: {event_payload.get('symbol')} {event_side}")
+        if not any(
+            _place_order_event_matches_decision(event, decision, final_decision, expected_entry_policy=expected_entry_policy)
+            for event in place_order_events
+        ):
             raise RuntimeError(f"{final_decision} decision does not match the place_order exchange event (expected entry policy: {expected_entry_policy or 'next_open'})")
         if strict_entry_events:
             disallowed = []

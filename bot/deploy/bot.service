@@ -1,0 +1,21 @@
+# User-level systemd unit (no sudo needed by the deploy key).
+# Install as the 'deploy' user:
+#   mkdir -p ~/.config/systemd/user
+#   cp /opt/traderbot/bot/deploy/bot.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now bot
+#   loginctl enable-linger deploy   # keep the user manager alive after logout
+[Unit]
+Description=traderbot (liqrev v2 executor)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/traderbot
+ExecStart=/opt/traderbot/venv/bin/python -m bot
+Restart=always
+RestartSec=10
+# .env lives in /opt/traderbot/.env (chmod 600), read by the bot itself
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

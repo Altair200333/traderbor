@@ -44,6 +44,12 @@ FEATURES = [
     "altseason", "rank_roc4", "rank_roc24", "rank_volratio",
     "pat_P1", "pat_P1H", "pat_P2", "pat_P3", "is_long",
 ]
+# scanner-v3 A1 multi-horizon taker-flow aggregates (opt-in via --with-flow)
+FLOW_FEATURES = [
+    "taker_ema_24h", "taker_ema_72h", "taker_ema_168h", "taker_z168",
+    "flow_z_24h", "flow_z_72h", "flow_div_24h", "flow_div_72h",
+    "flow_z24_rank",
+]
 HORIZON_MS = 24 * 3_600_000
 RETEST_P = 0.4
 
@@ -141,6 +147,8 @@ def main() -> None:
     ap.add_argument("--events", default=str(EVENTS))
     ap.add_argument("--drop-static", action="store_true",
                     help="drop tier/uni_* snapshot features (2026-07 leak risk)")
+    ap.add_argument("--with-flow", action="store_true",
+                    help="append A1 multi-horizon taker-flow aggregate features")
     ap.add_argument("--train-longp1", action="store_true",
                     help="train only on long P1 events (specialist)")
     ap.add_argument("--pred-out", default=str(PRED_OUT))
@@ -148,6 +156,8 @@ def main() -> None:
     global FEATURES
     if args.drop_static:
         FEATURES = [f for f in FEATURES if f not in ("tier", "uni_adr_pct", "uni_log_spot30")]
+    if args.with_flow:
+        FEATURES = FEATURES + FLOW_FEATURES
 
     from sklearn.metrics import roc_auc_score
 

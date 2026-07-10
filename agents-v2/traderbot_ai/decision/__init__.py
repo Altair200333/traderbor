@@ -8,6 +8,7 @@ __all__ = [
     "DecisionProvider",
     "HoldDecisionProvider",
     "OpenAIAgentsDecisionProvider",
+    "TakeAllDecisionProvider",
 ]
 
 
@@ -24,4 +25,8 @@ def __getattr__(name: str) -> object:
         from traderbot_ai.decision.openai_agents_provider import OpenAIAgentsDecisionProvider
 
         return OpenAIAgentsDecisionProvider
+    if name == "TakeAllDecisionProvider":
+        from traderbot_ai.decision.take_all_provider import TakeAllDecisionProvider
+
+        return TakeAllDecisionProvider
     raise AttributeError(name)

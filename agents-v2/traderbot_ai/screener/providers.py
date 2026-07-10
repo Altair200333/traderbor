@@ -12,9 +12,10 @@ Heavy deps (pandas/lightgbm) are imported lazily inside scan_v2 so the screener
 package stays dependency-light for legacy use.
 
 Env:
-  TRADERBOT_SCANNER_PROVIDER   legacy|v2 (default legacy) — replay default
+  TRADERBOT_SCANNER_PROVIDER   legacy|v2|v3-file (default legacy) — replay default
   TRADERBOT_SCANNER_V2_ARTIFACTS  artifact dir override
   TRADERBOT_SCANNER_V2_MIN_EV  EV threshold override (float, default 0.0)
+  TRADERBOT_SCANNER_V3_PINGS   parquet of precomputed v3 pings (v3-file provider)
 """
 from __future__ import annotations
 
@@ -31,7 +32,7 @@ from .plan import PlanPrimitives
 from .screener import ScanResult, SymbolRow
 from .state import TradingState, candidate_cooldown_key
 
-SCANNER_PROVIDERS = ("legacy", "v2")
+SCANNER_PROVIDERS = ("legacy", "v2", "v3-file")
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCANNER_LAB = _REPO_ROOT / "research" / "scanner_lab"
 _DEFAULT_ARTIFACTS = _REPO_ROOT / "research" / "artifacts" / "scanner_v2"
@@ -237,6 +238,118 @@ def scan_v2(
         global_blocks=global_blocks,
         btc_roc_4h=btc_roc_4h,
         data_warnings=data_warnings,
+    )
+
+
+_v3_pings_cache: dict[str, dict[int, list[dict[str, Any]]]] = {}
+
+
+def _load_v3_pings(pings_path: Path) -> dict[int, list[dict[str, Any]]]:
+    key = str(pings_path)
+    if key not in _v3_pings_cache:
+        import pandas as pd
+        df = pd.read_parquet(pings_path)
+        by_bar: dict[int, list[dict[str, Any]]] = {}
+        for record in df.to_dict("records"):
+            by_bar.setdefault(int(record["as_of"]), []).append(record)
+        _v3_pings_cache[key] = by_bar
+    return _v3_pings_cache[key]
+
+
+def _opt_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    value = float(value)
+    return None if value != value else value
+
+
+def scan_v3_file(
+    symbols: list[str],
+    as_of_ms: int,
+    cfg: ScreenerConfig | None = None,
+    state: TradingState | None = None,
+    pings_path: str | Path | None = None,
+) -> ScanResult:
+    """File-backed scanner: emits precomputed scanner-v3 pings (research parquet,
+    champion EV>0 selection) on the exact bar they fired. Bars without pings
+    produce an empty scan. Offline replay plumbing only — no live analog."""
+    cfg = cfg or ScreenerConfig()
+    state = state or TradingState()
+    if pings_path is None:
+        pings_path = os.environ.get("TRADERBOT_SCANNER_V3_PINGS")
+    if not pings_path:
+        raise ValueError("scanner v3-file requires TRADERBOT_SCANNER_V3_PINGS (pings parquet)")
+    pings_path = Path(pings_path)
+    by_bar = _load_v3_pings(pings_path)
+    as_of_iso = datetime.fromtimestamp(as_of_ms / 1000, tz=timezone.utc).isoformat()
+
+    wanted = {s.upper() for s in symbols}
+    global_blocks = scan_global_blocks(state, cfg, as_of_ms)
+    rows: dict[str, SymbolRow] = {}
+    result_candidates: list[str] = []
+    btc_roc_4h = None
+
+    for ping in by_bar.get(as_of_ms, []):
+        symbol = str(ping["symbol"]).upper()
+        if symbol not in wanted:
+            continue
+        side = str(ping.get("side") or "long")
+        entry = float(ping["entry"])
+        d_final = float(ping["d_final"])
+        invalidation = entry * (1.0 - d_final) if side == "long" else entry * (1.0 + d_final)
+        plan = PlanPrimitives(
+            pattern_used=str(ping.get("pattern") or "P1"),
+            boundary_price=_opt_float(ping.get("boundary")),
+            trigger_age_bars=None,
+            invalidation_price=invalidation,
+            d_atr=float(ping.get("d_atr") or d_final),
+            d_struct=float(ping.get("d_struct") or 0.0),
+            d_noise=_opt_float(ping.get("d_noise")),
+            d_final=d_final,
+            stop_feasible=bool(ping.get("stop_feasible", True)),
+            tp_rr_default=float(ping.get("tp_rr") or 2.0),
+            ref_entry=entry,
+        )
+        if btc_roc_4h is None:
+            btc_roc_4h = _opt_float(ping.get("btc_roc_4h"))
+        blocked, extra_global = state_blocks(symbol, side, state, as_of_ms, cfg,
+                                             signal_quality="hard")
+        for item in extra_global:
+            if item not in global_blocks:
+                global_blocks.append(item)
+        update = {
+            "close": entry,
+            "roc_4h": _opt_float(ping.get("roc_4h")),
+            "roc_24h": _opt_float(ping.get("roc_24h")),
+            "roc_1h_last": _opt_float(ping.get("roc_1h")),
+            "vol_ratio": _opt_float(ping.get("vol_ratio")),
+            "rsi": _opt_float(ping.get("rsi14")),
+            "atr_pct": _opt_float(ping.get("atr_pct")),
+            "ema20_ext_atr": _opt_float(ping.get("ema20_ext_atr")),
+            "patterns_long": [plan.pattern_used] if side == "long" else [],
+            "signal_candidate_before_state": side,
+            "signal_quality_before_state": "hard",
+            "plan": plan,
+            "candidate_score": _opt_float(ping.get("ev_val")),
+        }
+        if blocked or global_blocks_block_entry(global_blocks):
+            update["blocked_by"] = blocked or ["global"]
+        else:
+            update["candidate"] = side
+            update["candidate_quality"] = "hard"
+            result_candidates.append(symbol)
+        rows[symbol] = SymbolRow(symbol=symbol, status="ok").model_copy(update=update)
+
+    return ScanResult(
+        as_of_ms=as_of_ms,
+        as_of_iso=as_of_iso,
+        screener_version="scanner-v3-file-0.1.0",
+        config_hash=hashlib.sha256(pings_path.name.encode()).hexdigest()[:12],
+        symbols=[rows[s] for s in sorted(rows)],
+        candidates=result_candidates,
+        global_blocks=global_blocks,
+        btc_roc_4h=btc_roc_4h,
+        data_warnings=[],
     )
 
 

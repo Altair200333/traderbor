@@ -24,11 +24,53 @@ KL = REPO_ROOT / "research" / "data" / "klines"
 OUT_DEFAULT = REPO_ROOT / "research" / "data" / "events.parquet"
 
 
+def merge_perp(ev: pd.DataFrame, perp_dir: Path) -> pd.DataFrame:
+    """OPT-IN: add the 11 perp funding/OI features (perp_features.ALL_FEATURES)
+    via a per-symbol backward merge_asof on `as_of`.
+
+    Both the event `as_of` and the perp_feature_frame grid are exact hourly (:00)
+    ms epochs, so a backward merge_asof resolves to an EXACT hourly match for any
+    as_of inside the perp grid, and only carries the last known settlement forward
+    for the few tail events past the last downloaded row. Missing parquet / empty
+    frame / read error => NaN columns for that symbol (never crashes the build)."""
+    from perp_features import ALL_FEATURES as PERP_FEATURES, perp_feature_frame
+
+    ev = ev.copy()
+    ev["_ord"] = np.arange(len(ev))
+    parts, n_fail = [], 0
+    for sym, g in ev.groupby("symbol", sort=False):
+        g = g.sort_values("as_of")
+        try:
+            pf = perp_feature_frame(sym, perp_dir)
+        except Exception as exc:  # e.g. metrics parquet mid-write during background dl
+            pf, n_fail = None, n_fail + 1
+            print(f"  perp merge WARN {sym}: {exc}", flush=True)
+        if pf is None or pf.empty:
+            for c in PERP_FEATURES:
+                g[c] = np.nan
+            parts.append(g)
+            continue
+        pf = pf.sort_values("as_of")[["as_of"] + list(PERP_FEATURES)]
+        parts.append(pd.merge_asof(g, pf, on="as_of", direction="backward"))
+    out = (pd.concat(parts).sort_values("_ord")
+           .drop(columns="_ord").reset_index(drop=True))
+    cov = out["funding_rate_last"].notna().mean()
+    print(f"perp merge: +{len(PERP_FEATURES)} cols, {n_fail} symbols failed, "
+          f"funding populated frac={cov:.3f}", flush=True)
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(OUT_DEFAULT))
+    ap.add_argument("--klines", default=str(KL),
+                    help="klines root with 1h/ and 5m/ parquet folders")
     ap.add_argument("--pairs", default="", help="comma list override for debugging")
+    ap.add_argument("--perp-dir", default="",
+                    help="OPT-IN: merge 11 perp funding/OI features from this dir "
+                         "(expects funding/ + metrics_5m/); default off => output unchanged")
     args = ap.parse_args()
+    kl_root = Path(args.klines)
 
     coins = load_universe()
     if args.pairs:
@@ -38,7 +80,7 @@ def main() -> None:
     t0 = time.time()
     frames_1h: dict[str, pd.DataFrame] = {}
     for c in coins:
-        p = KL / "1h" / f"{c.pair}.parquet"
+        p = kl_root / "1h" / f"{c.pair}.parquet"
         if p.exists():
             frames_1h[c.pair] = pd.read_parquet(p)
     print(f"loaded {len(frames_1h)} 1h frames in {time.time()-t0:.0f}s", flush=True)
@@ -56,7 +98,7 @@ def main() -> None:
         ev = scan_symbol(df1h, c.pair, btc_roc4h)
         if ev.empty:
             continue
-        p5 = KL / "5m" / f"{c.pair}.parquet"
+        p5 = kl_root / "5m" / f"{c.pair}.parquet"
         if not p5.exists():
             continue
         df5m = pd.read_parquet(p5)
@@ -78,6 +120,9 @@ def main() -> None:
         "uni_log_spot30": np.log10(max(c.spot30_musd, 0.05)),
     } for c in coins])
     ev = join_market(ev, market, ranks, meta)
+
+    if args.perp_dir:
+        ev = merge_perp(ev, Path(args.perp_dir))
 
     out = Path(args.out)
     ev.to_parquet(out, index=False)

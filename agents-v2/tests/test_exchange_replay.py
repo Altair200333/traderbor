@@ -1364,6 +1364,119 @@ class FirstBarOnlySessionTests(unittest.TestCase):
             )
 
 
+class TakeAllProviderTests(unittest.TestCase):
+    def test_take_all_enters_with_plan_geometry_and_passes_validation(self) -> None:
+        from traderbot_ai.decision.take_all_provider import TakeAllDecisionProvider
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = LocalMarketCache(Path(tmp) / "market.sqlite3")
+            for hour in range(4):
+                cache.upsert_candles([candle_at_close(BTC, BASE_MS + hour * ONE_HOUR_MS, 100.0, 100.5, 99.5, 100.0)])
+            config = build_exchange_replay_config(
+                symbols=[BTC],
+                start_time=BASE_MS,
+                end_time=BASE_MS + 3 * ONE_HOUR_MS,
+                decision_interval="1h",
+                state_path=Path(tmp) / "exchange.json",
+                events_path=Path(tmp) / "exchange-events.jsonl",
+                replay_path=Path(tmp) / "replay.jsonl",
+                screener_mode="deterministic",
+                run_id="take-all-test",
+                decide_first_bar_only=True,
+            )
+            row = SymbolRow(
+                symbol=BTC,
+                status="ok",
+                close=100.0,
+                signal_candidate_before_state="long",
+                candidate="long",
+                plan=PlanPrimitives(
+                    pattern_used="P1",
+                    boundary_price=99.0,
+                    invalidation_price=98.0,
+                    d_atr=0.02,
+                    d_struct=0.02,
+                    d_noise=0.015,
+                    d_final=0.02,
+                    stop_feasible=True,
+                    tp_rr_default=3.0,
+                    ref_entry=100.0,
+                ),
+            )
+            provider = TakeAllDecisionProvider()
+            with patch("traderbot_ai.simulator.exchange_replay.run_screener", return_value=_scan_result([row], candidates=[BTC])), patch(
+                "traderbot_ai.simulator.exchange_replay.write_scan_artifacts",
+                return_value={"artifact_path": str(Path(tmp) / "scan.json"), "sha256": "hash"},
+            ):
+                result = run_exchange_replay(config=config, decide=provider.decide, cache=cache)
+
+        first = result["steps"][0]
+        self.assertEqual(first["decision"]["final_decision"], "long")
+        self.assertEqual(first["decision"]["symbol"], BTC)
+        orders = [event for event in first["agent_exchange_events"] if event.get("type") == "place_order"]
+        self.assertEqual(len(orders), 1)
+        payload = orders[0]["payload"]
+        self.assertAlmostEqual(payload["stopLoss"], 98.0)
+        self.assertAlmostEqual(payload["takeProfit"], 106.0)
+        # risk 0.75%/d_final 2% = 37.5% of equity, capped by the 20% notional cap -> $200
+        self.assertAlmostEqual(float(first["decision"]["amount"]), 200.0, delta=2.0)
+
+    def test_take_all_multi_candidate_bar_places_multiple_orders_and_validates(self) -> None:
+        from traderbot_ai.decision.take_all_provider import TakeAllDecisionProvider
+
+        second_symbol = "ETHUSDT"
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = LocalMarketCache(Path(tmp) / "market.sqlite3")
+            for hour in range(4):
+                cache.upsert_candles([
+                    candle_at_close(BTC, BASE_MS + hour * ONE_HOUR_MS, 100.0, 100.5, 99.5, 100.0),
+                    candle_at_close(second_symbol, BASE_MS + hour * ONE_HOUR_MS, 50.0, 50.2, 49.8, 50.0),
+                ])
+            config = build_exchange_replay_config(
+                symbols=[BTC, second_symbol],
+                start_time=BASE_MS,
+                end_time=BASE_MS + 3 * ONE_HOUR_MS,
+                decision_interval="1h",
+                state_path=Path(tmp) / "exchange.json",
+                events_path=Path(tmp) / "exchange-events.jsonl",
+                replay_path=Path(tmp) / "replay.jsonl",
+                screener_mode="deterministic",
+                run_id="take-all-multi",
+                decide_first_bar_only=True,
+            )
+
+            def plan_for(ref: float) -> PlanPrimitives:
+                return PlanPrimitives(
+                    pattern_used="P1",
+                    boundary_price=ref * 0.99,
+                    invalidation_price=ref * 0.98,
+                    d_atr=0.02,
+                    d_struct=0.02,
+                    d_noise=0.015,
+                    d_final=0.02,
+                    stop_feasible=True,
+                    tp_rr_default=3.0,
+                    ref_entry=ref,
+                )
+
+            rows = [
+                SymbolRow(symbol=BTC, status="ok", close=100.0, signal_candidate_before_state="long", candidate="long", plan=plan_for(100.0)),
+                SymbolRow(symbol=second_symbol, status="ok", close=50.0, signal_candidate_before_state="long", candidate="long", plan=plan_for(50.0)),
+            ]
+            provider = TakeAllDecisionProvider()
+            with patch("traderbot_ai.simulator.exchange_replay.run_screener", return_value=_scan_result(rows, candidates=[BTC, second_symbol])), patch(
+                "traderbot_ai.simulator.exchange_replay.write_scan_artifacts",
+                return_value={"artifact_path": str(Path(tmp) / "scan.json"), "sha256": "hash"},
+            ):
+                result = run_exchange_replay(config=config, decide=provider.decide, cache=cache)
+
+        first = result["steps"][0]
+        self.assertEqual(first["decision"]["final_decision"], "long")
+        orders = [event for event in first["agent_exchange_events"] if event.get("type") == "place_order"]
+        self.assertEqual(len(orders), 2)
+        self.assertEqual({order["payload"]["symbol"] for order in orders}, {BTC, second_symbol})
+
+
 class DeterministicAllowlistEnvTests(unittest.TestCase):
     def test_allowlist_env_carries_ref_drift_and_noise_floor(self) -> None:
         from traderbot_ai.simulator.exchange_replay import _deterministic_candidate_allowlist_env

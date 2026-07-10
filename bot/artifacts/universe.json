@@ -1,0 +1,901 @@
+{
+ "generated_utc": "2026-07-09T16:40:33.206123+00:00",
+ "source": "docs\\notes\\2026-07-07\\bybit-trading-universe.md",
+ "n": 149,
+ "pairs": [
+  {
+   "symbol": "BTC",
+   "pair": "BTCUSDT",
+   "tier": "T1",
+   "bybit_symbol": "BTCUSDT"
+  },
+  {
+   "symbol": "ETH",
+   "pair": "ETHUSDT",
+   "tier": "T1",
+   "bybit_symbol": "ETHUSDT"
+  },
+  {
+   "symbol": "SOL",
+   "pair": "SOLUSDT",
+   "tier": "T1",
+   "bybit_symbol": "SOLUSDT"
+  },
+  {
+   "symbol": "XRP",
+   "pair": "XRPUSDT",
+   "tier": "T1",
+   "bybit_symbol": "XRPUSDT"
+  },
+  {
+   "symbol": "DOGE",
+   "pair": "DOGEUSDT",
+   "tier": "T1",
+   "bybit_symbol": "DOGEUSDT"
+  },
+  {
+   "symbol": "NEAR",
+   "pair": "NEARUSDT",
+   "tier": "T1",
+   "bybit_symbol": "NEARUSDT"
+  },
+  {
+   "symbol": "ADA",
+   "pair": "ADAUSDT",
+   "tier": "T1",
+   "bybit_symbol": "ADAUSDT"
+  },
+  {
+   "symbol": "ZEC",
+   "pair": "ZECUSDT",
+   "tier": "T1",
+   "bybit_symbol": "ZECUSDT"
+  },
+  {
+   "symbol": "BONK",
+   "pair": "BONKUSDT",
+   "tier": "T2",
+   "bybit_symbol": "1000BONKUSDT"
+  },
+  {
+   "symbol": "TLM",
+   "pair": "TLMUSDT",
+   "tier": "T3",
+   "bybit_symbol": "TLMUSDT"
+  },
+  {
+   "symbol": "AAVE",
+   "pair": "AAVEUSDT",
+   "tier": "T1",
+   "bybit_symbol": "AAVEUSDT"
+  },
+  {
+   "symbol": "WLD",
+   "pair": "WLDUSDT",
+   "tier": "T1",
+   "bybit_symbol": "WLDUSDT"
+  },
+  {
+   "symbol": "SUI",
+   "pair": "SUIUSDT",
+   "tier": "T1",
+   "bybit_symbol": "SUIUSDT"
+  },
+  {
+   "symbol": "PEPE",
+   "pair": "PEPEUSDT",
+   "tier": "T1",
+   "bybit_symbol": "1000PEPEUSDT"
+  },
+  {
+   "symbol": "ENA",
+   "pair": "ENAUSDT",
+   "tier": "T1",
+   "bybit_symbol": "ENAUSDT"
+  },
+  {
+   "symbol": "BNB",
+   "pair": "BNBUSDT",
+   "tier": "T1",
+   "bybit_symbol": "BNBUSDT"
+  },
+  {
+   "symbol": "HMSTR",
+   "pair": "HMSTRUSDT",
+   "tier": "T2",
+   "bybit_symbol": "HMSTRUSDT"
+  },
+  {
+   "symbol": "XLM",
+   "pair": "XLMUSDT",
+   "tier": "T1",
+   "bybit_symbol": "XLMUSDT"
+  },
+  {
+   "symbol": "LINK",
+   "pair": "LINKUSDT",
+   "tier": "T1",
+   "bybit_symbol": "LINKUSDT"
+  },
+  {
+   "symbol": "ONDO",
+   "pair": "ONDOUSDT",
+   "tier": "T2",
+   "bybit_symbol": "ONDOUSDT"
+  },
+  {
+   "symbol": "LTC",
+   "pair": "LTCUSDT",
+   "tier": "T1",
+   "bybit_symbol": "LTCUSDT"
+  },
+  {
+   "symbol": "AVAX",
+   "pair": "AVAXUSDT",
+   "tier": "T1",
+   "bybit_symbol": "AVAXUSDT"
+  },
+  {
+   "symbol": "TAO",
+   "pair": "TAOUSDT",
+   "tier": "T1",
+   "bybit_symbol": "TAOUSDT"
+  },
+  {
+   "symbol": "EPIC",
+   "pair": "EPICUSDT",
+   "tier": "T2",
+   "bybit_symbol": "EPICUSDT"
+  },
+  {
+   "symbol": "BCH",
+   "pair": "BCHUSDT",
+   "tier": "T2",
+   "bybit_symbol": "BCHUSDT"
+  },
+  {
+   "symbol": "XPL",
+   "pair": "XPLUSDT",
+   "tier": "T1",
+   "bybit_symbol": "XPLUSDT"
+  },
+  {
+   "symbol": "UNI",
+   "pair": "UNIUSDT",
+   "tier": "T1",
+   "bybit_symbol": "UNIUSDT"
+  },
+  {
+   "symbol": "TRUMP",
+   "pair": "TRUMPUSDT",
+   "tier": "T2",
+   "bybit_symbol": "TRUMPUSDT"
+  },
+  {
+   "symbol": "WIF",
+   "pair": "WIFUSDT",
+   "tier": "T2",
+   "bybit_symbol": "WIFUSDT"
+  },
+  {
+   "symbol": "PYTH",
+   "pair": "PYTHUSDT",
+   "tier": "T2",
+   "bybit_symbol": "PYTHUSDT"
+  },
+  {
+   "symbol": "BLUR",
+   "pair": "BLURUSDT",
+   "tier": "T3",
+   "bybit_symbol": "BLURUSDT"
+  },
+  {
+   "symbol": "PENGU",
+   "pair": "PENGUUSDT",
+   "tier": "T2",
+   "bybit_symbol": "PENGUUSDT"
+  },
+  {
+   "symbol": "DOT",
+   "pair": "DOTUSDT",
+   "tier": "T2",
+   "bybit_symbol": "DOTUSDT"
+  },
+  {
+   "symbol": "INJ",
+   "pair": "INJUSDT",
+   "tier": "T2",
+   "bybit_symbol": "INJUSDT"
+  },
+  {
+   "symbol": "HBAR",
+   "pair": "HBARUSDT",
+   "tier": "T2",
+   "bybit_symbol": "HBARUSDT"
+  },
+  {
+   "symbol": "TRB",
+   "pair": "TRBUSDT",
+   "tier": "T3",
+   "bybit_symbol": "TRBUSDT"
+  },
+  {
+   "symbol": "CRV",
+   "pair": "CRVUSDT",
+   "tier": "T2",
+   "bybit_symbol": "CRVUSDT"
+  },
+  {
+   "symbol": "TRX",
+   "pair": "TRXUSDT",
+   "tier": "T1",
+   "bybit_symbol": "TRXUSDT"
+  },
+  {
+   "symbol": "ALLO",
+   "pair": "ALLOUSDT",
+   "tier": "T1",
+   "bybit_symbol": "ALLOUSDT"
+  },
+  {
+   "symbol": "ID",
+   "pair": "IDUSDT",
+   "tier": "T2",
+   "bybit_symbol": "IDUSDT"
+  },
+  {
+   "symbol": "ARB",
+   "pair": "ARBUSDT",
+   "tier": "T2",
+   "bybit_symbol": "ARBUSDT"
+  },
+  {
+   "symbol": "DEXE",
+   "pair": "DEXEUSDT",
+   "tier": "T2",
+   "bybit_symbol": "DEXEUSDT"
+  },
+  {
+   "symbol": "TIA",
+   "pair": "TIAUSDT",
+   "tier": "T2",
+   "bybit_symbol": "TIAUSDT"
+  },
+  {
+   "symbol": "BEL",
+   "pair": "BELUSDT",
+   "tier": "T2",
+   "bybit_symbol": "BELUSDT"
+  },
+  {
+   "symbol": "JTO",
+   "pair": "JTOUSDT",
+   "tier": "T2",
+   "bybit_symbol": "JTOUSDT"
+  },
+  {
+   "symbol": "VIRTUAL",
+   "pair": "VIRTUALUSDT",
+   "tier": "T2",
+   "bybit_symbol": "VIRTUALUSDT"
+  },
+  {
+   "symbol": "ETHFI",
+   "pair": "ETHFIUSDT",
+   "tier": "T2",
+   "bybit_symbol": "ETHFIUSDT"
+  },
+  {
+   "symbol": "APT",
+   "pair": "APTUSDT",
+   "tier": "T2",
+   "bybit_symbol": "APTUSDT"
+  },
+  {
+   "symbol": "JUP",
+   "pair": "JUPUSDT",
+   "tier": "T2",
+   "bybit_symbol": "JUPUSDT"
+  },
+  {
+   "symbol": "ICP",
+   "pair": "ICPUSDT",
+   "tier": "T2",
+   "bybit_symbol": "ICPUSDT"
+  },
+  {
+   "symbol": "ZRO",
+   "pair": "ZROUSDT",
+   "tier": "T2",
+   "bybit_symbol": "ZROUSDT"
+  },
+  {
+   "symbol": "OP",
+   "pair": "OPUSDT",
+   "tier": "T2",
+   "bybit_symbol": "OPUSDT"
+  },
+  {
+   "symbol": "RENDER",
+   "pair": "RENDERUSDT",
+   "tier": "T2",
+   "bybit_symbol": "RENDERUSDT"
+  },
+  {
+   "symbol": "ATOM",
+   "pair": "ATOMUSDT",
+   "tier": "T2",
+   "bybit_symbol": "ATOMUSDT"
+  },
+  {
+   "symbol": "SEI",
+   "pair": "SEIUSDT",
+   "tier": "T2",
+   "bybit_symbol": "SEIUSDT"
+  },
+  {
+   "symbol": "SHIB",
+   "pair": "SHIBUSDT",
+   "tier": "T2",
+   "bybit_symbol": "SHIB1000USDT"
+  },
+  {
+   "symbol": "LDO",
+   "pair": "LDOUSDT",
+   "tier": "T2",
+   "bybit_symbol": "LDOUSDT"
+  },
+  {
+   "symbol": "ASTER",
+   "pair": "ASTERUSDT",
+   "tier": "T2",
+   "bybit_symbol": "ASTERUSDT"
+  },
+  {
+   "symbol": "FIL",
+   "pair": "FILUSDT",
+   "tier": "T2",
+   "bybit_symbol": "FILUSDT"
+  },
+  {
+   "symbol": "RESOLV",
+   "pair": "RESOLVUSDT",
+   "tier": "T3",
+   "bybit_symbol": "RESOLVUSDT"
+  },
+  {
+   "symbol": "GALA",
+   "pair": "GALAUSDT",
+   "tier": "T2",
+   "bybit_symbol": "GALAUSDT"
+  },
+  {
+   "symbol": "ALICE",
+   "pair": "ALICEUSDT",
+   "tier": "T3",
+   "bybit_symbol": "ALICEUSDT"
+  },
+  {
+   "symbol": "EIGEN",
+   "pair": "EIGENUSDT",
+   "tier": "T2",
+   "bybit_symbol": "EIGENUSDT"
+  },
+  {
+   "symbol": "IMX",
+   "pair": "IMXUSDT",
+   "tier": "T3",
+   "bybit_symbol": "IMXUSDT"
+  },
+  {
+   "symbol": "MIRA",
+   "pair": "MIRAUSDT",
+   "tier": "T3",
+   "bybit_symbol": "MIRAUSDT"
+  },
+  {
+   "symbol": "ORDI",
+   "pair": "ORDIUSDT",
+   "tier": "T2",
+   "bybit_symbol": "ORDIUSDT"
+  },
+  {
+   "symbol": "ALGO",
+   "pair": "ALGOUSDT",
+   "tier": "T2",
+   "bybit_symbol": "ALGOUSDT"
+  },
+  {
+   "symbol": "STRK",
+   "pair": "STRKUSDT",
+   "tier": "T3",
+   "bybit_symbol": "STRKUSDT"
+  },
+  {
+   "symbol": "GIGGLE",
+   "pair": "GIGGLEUSDT",
+   "tier": "T2",
+   "bybit_symbol": "GIGGLEUSDT"
+  },
+  {
+   "symbol": "WLFI",
+   "pair": "WLFIUSDT",
+   "tier": "T2",
+   "bybit_symbol": "WLFIUSDT"
+  },
+  {
+   "symbol": "BERA",
+   "pair": "BERAUSDT",
+   "tier": "T2",
+   "bybit_symbol": "BERAUSDT"
+  },
+  {
+   "symbol": "PLUME",
+   "pair": "PLUMEUSDT",
+   "tier": "T3",
+   "bybit_symbol": "PLUMEUSDT"
+  },
+  {
+   "symbol": "ETC",
+   "pair": "ETCUSDT",
+   "tier": "T2",
+   "bybit_symbol": "ETCUSDT"
+  },
+  {
+   "symbol": "KAITO",
+   "pair": "KAITOUSDT",
+   "tier": "T3",
+   "bybit_symbol": "KAITOUSDT"
+  },
+  {
+   "symbol": "DYDX",
+   "pair": "DYDXUSDT",
+   "tier": "T2",
+   "bybit_symbol": "DYDXUSDT"
+  },
+  {
+   "symbol": "PENDLE",
+   "pair": "PENDLEUSDT",
+   "tier": "T2",
+   "bybit_symbol": "PENDLEUSDT"
+  },
+  {
+   "symbol": "MET",
+   "pair": "METUSDT",
+   "tier": "T3",
+   "bybit_symbol": "METUSDT"
+  },
+  {
+   "symbol": "POL",
+   "pair": "POLUSDT",
+   "tier": "T2",
+   "bybit_symbol": "POLUSDT"
+  },
+  {
+   "symbol": "KSM",
+   "pair": "KSMUSDT",
+   "tier": "T3",
+   "bybit_symbol": "KSMUSDT"
+  },
+  {
+   "symbol": "MORPHO",
+   "pair": "MORPHOUSDT",
+   "tier": "T2",
+   "bybit_symbol": "MORPHOUSDT"
+  },
+  {
+   "symbol": "ME",
+   "pair": "MEUSDT",
+   "tier": "T3",
+   "bybit_symbol": "MEUSDT"
+  },
+  {
+   "symbol": "MOVR",
+   "pair": "MOVRUSDT",
+   "tier": "T3",
+   "bybit_symbol": "MOVRUSDT"
+  },
+  {
+   "symbol": "SAND",
+   "pair": "SANDUSDT",
+   "tier": "T3",
+   "bybit_symbol": "SANDUSDT"
+  },
+  {
+   "symbol": "GMT",
+   "pair": "GMTUSDT",
+   "tier": "T3",
+   "bybit_symbol": "GMTUSDT"
+  },
+  {
+   "symbol": "W",
+   "pair": "WUSDT",
+   "tier": "T3",
+   "bybit_symbol": "WUSDT"
+  },
+  {
+   "symbol": "JASMY",
+   "pair": "JASMYUSDT",
+   "tier": "T3",
+   "bybit_symbol": "JASMYUSDT"
+  },
+  {
+   "symbol": "CAKE",
+   "pair": "CAKEUSDT",
+   "tier": "T2",
+   "bybit_symbol": "CAKEUSDT"
+  },
+  {
+   "symbol": "APE",
+   "pair": "APEUSDT",
+   "tier": "T3",
+   "bybit_symbol": "APEUSDT"
+  },
+  {
+   "symbol": "ZK",
+   "pair": "ZKUSDT",
+   "tier": "T2",
+   "bybit_symbol": "ZKUSDT"
+  },
+  {
+   "symbol": "MINA",
+   "pair": "MINAUSDT",
+   "tier": "T3",
+   "bybit_symbol": "MINAUSDT"
+  },
+  {
+   "symbol": "DASH",
+   "pair": "DASHUSDT",
+   "tier": "T2",
+   "bybit_symbol": "DASHUSDT"
+  },
+  {
+   "symbol": "S",
+   "pair": "SUSDT",
+   "tier": "T2",
+   "bybit_symbol": "SUSDT"
+  },
+  {
+   "symbol": "ENS",
+   "pair": "ENSUSDT",
+   "tier": "T3",
+   "bybit_symbol": "ENSUSDT"
+  },
+  {
+   "symbol": "SKY",
+   "pair": "SKYUSDT",
+   "tier": "T3",
+   "bybit_symbol": "SKYUSDT"
+  },
+  {
+   "symbol": "BIO",
+   "pair": "BIOUSDT",
+   "tier": "T2",
+   "bybit_symbol": "BIOUSDT"
+  },
+  {
+   "symbol": "THETA",
+   "pair": "THETAUSDT",
+   "tier": "T3",
+   "bybit_symbol": "THETAUSDT"
+  },
+  {
+   "symbol": "XTZ",
+   "pair": "XTZUSDT",
+   "tier": "T3",
+   "bybit_symbol": "XTZUSDT"
+  },
+  {
+   "symbol": "KITE",
+   "pair": "KITEUSDT",
+   "tier": "T2",
+   "bybit_symbol": "KITEUSDT"
+  },
+  {
+   "symbol": "SNX",
+   "pair": "SNXUSDT",
+   "tier": "T3",
+   "bybit_symbol": "SNXUSDT"
+  },
+  {
+   "symbol": "STG",
+   "pair": "STGUSDT",
+   "tier": "T2",
+   "bybit_symbol": "STGUSDT"
+  },
+  {
+   "symbol": "SAHARA",
+   "pair": "SAHARAUSDT",
+   "tier": "T2",
+   "bybit_symbol": "SAHARAUSDT"
+  },
+  {
+   "symbol": "AXS",
+   "pair": "AXSUSDT",
+   "tier": "T3",
+   "bybit_symbol": "AXSUSDT"
+  },
+  {
+   "symbol": "NOM",
+   "pair": "NOMUSDT",
+   "tier": "T3",
+   "bybit_symbol": "NOMUSDT"
+  },
+  {
+   "symbol": "NOT",
+   "pair": "NOTUSDT",
+   "tier": "T3",
+   "bybit_symbol": "NOTUSDT"
+  },
+  {
+   "symbol": "AGLD",
+   "pair": "AGLDUSDT",
+   "tier": "T3",
+   "bybit_symbol": "AGLDUSDT"
+  },
+  {
+   "symbol": "OG",
+   "pair": "OGUSDT",
+   "tier": "T3",
+   "bybit_symbol": "OGUSDT"
+  },
+  {
+   "symbol": "AIXBT",
+   "pair": "AIXBTUSDT",
+   "tier": "T3",
+   "bybit_symbol": "AIXBTUSDT"
+  },
+  {
+   "symbol": "CHZ",
+   "pair": "CHZUSDT",
+   "tier": "T2",
+   "bybit_symbol": "CHZUSDT"
+  },
+  {
+   "symbol": "MANA",
+   "pair": "MANAUSDT",
+   "tier": "T3",
+   "bybit_symbol": "MANAUSDT"
+  },
+  {
+   "symbol": "MOVE",
+   "pair": "MOVEUSDT",
+   "tier": "T3",
+   "bybit_symbol": "MOVEUSDT"
+  },
+  {
+   "symbol": "SOMI",
+   "pair": "SOMIUSDT",
+   "tier": "T3",
+   "bybit_symbol": "SOMIUSDT"
+  },
+  {
+   "symbol": "BARD",
+   "pair": "BARDUSDT",
+   "tier": "T3",
+   "bybit_symbol": "BARDUSDT"
+  },
+  {
+   "symbol": "FLOKI",
+   "pair": "FLOKIUSDT",
+   "tier": "T2",
+   "bybit_symbol": "1000FLOKIUSDT"
+  },
+  {
+   "symbol": "VET",
+   "pair": "VETUSDT",
+   "tier": "T3",
+   "bybit_symbol": "VETUSDT"
+  },
+  {
+   "symbol": "ZBT",
+   "pair": "ZBTUSDT",
+   "tier": "T2",
+   "bybit_symbol": "ZBTUSDT"
+  },
+  {
+   "symbol": "GRT",
+   "pair": "GRTUSDT",
+   "tier": "T3",
+   "bybit_symbol": "GRTUSDT"
+  },
+  {
+   "symbol": "STX",
+   "pair": "STXUSDT",
+   "tier": "T3",
+   "bybit_symbol": "STXUSDT"
+  },
+  {
+   "symbol": "LA",
+   "pair": "LAUSDT",
+   "tier": "T3",
+   "bybit_symbol": "LAUSDT"
+  },
+  {
+   "symbol": "HOLO",
+   "pair": "HOLOUSDT",
+   "tier": "T3",
+   "bybit_symbol": "HOLOUSDT"
+  },
+  {
+   "symbol": "MANTA",
+   "pair": "MANTAUSDT",
+   "tier": "T3",
+   "bybit_symbol": "MANTAUSDT"
+  },
+  {
+   "symbol": "COMP",
+   "pair": "COMPUSDT",
+   "tier": "T3",
+   "bybit_symbol": "COMPUSDT"
+  },
+  {
+   "symbol": "THE",
+   "pair": "THEUSDT",
+   "tier": "T3",
+   "bybit_symbol": "THEUSDT"
+  },
+  {
+   "symbol": "HOME",
+   "pair": "HOMEUSDT",
+   "tier": "T2",
+   "bybit_symbol": "HOMEUSDT"
+  },
+  {
+   "symbol": "MMT",
+   "pair": "MMTUSDT",
+   "tier": "T3",
+   "bybit_symbol": "MMTUSDT"
+  },
+  {
+   "symbol": "PNUT",
+   "pair": "PNUTUSDT",
+   "tier": "T3",
+   "bybit_symbol": "PNUTUSDT"
+  },
+  {
+   "symbol": "IOTA",
+   "pair": "IOTAUSDT",
+   "tier": "T3",
+   "bybit_symbol": "IOTAUSDT"
+  },
+  {
+   "symbol": "LINEA",
+   "pair": "LINEAUSDT",
+   "tier": "T3",
+   "bybit_symbol": "LINEAUSDT"
+  },
+  {
+   "symbol": "CELO",
+   "pair": "CELOUSDT",
+   "tier": "T3",
+   "bybit_symbol": "CELOUSDT"
+  },
+  {
+   "symbol": "TNSR",
+   "pair": "TNSRUSDT",
+   "tier": "T3",
+   "bybit_symbol": "TNSRUSDT"
+  },
+  {
+   "symbol": "ENJ",
+   "pair": "ENJUSDT",
+   "tier": "T3",
+   "bybit_symbol": "ENJUSDT"
+  },
+  {
+   "symbol": "HFT",
+   "pair": "HFTUSDT",
+   "tier": "T3",
+   "bybit_symbol": "HFTUSDT"
+  },
+  {
+   "symbol": "HEI",
+   "pair": "HEIUSDT",
+   "tier": "T2",
+   "bybit_symbol": "HEIUSDT"
+  },
+  {
+   "symbol": "HYPER",
+   "pair": "HYPERUSDT",
+   "tier": "T2",
+   "bybit_symbol": "HYPERUSDT"
+  },
+  {
+   "symbol": "AVNT",
+   "pair": "AVNTUSDT",
+   "tier": "T3",
+   "bybit_symbol": "AVNTUSDT"
+  },
+  {
+   "symbol": "AR",
+   "pair": "ARUSDT",
+   "tier": "T2",
+   "bybit_symbol": "ARUSDT"
+  },
+  {
+   "symbol": "ALT",
+   "pair": "ALTUSDT",
+   "tier": "T3",
+   "bybit_symbol": "ALTUSDT"
+  },
+  {
+   "symbol": "0G",
+   "pair": "0GUSDT",
+   "tier": "T3",
+   "bybit_symbol": "0GUSDT"
+  },
+  {
+   "symbol": "FF",
+   "pair": "FFUSDT",
+   "tier": "T3",
+   "bybit_symbol": "FFUSDT"
+  },
+  {
+   "symbol": "ACT",
+   "pair": "ACTUSDT",
+   "tier": "T3",
+   "bybit_symbol": "ACTUSDT"
+  },
+  {
+   "symbol": "BOME",
+   "pair": "BOMEUSDT",
+   "tier": "T3",
+   "bybit_symbol": "BOMEUSDT"
+  },
+  {
+   "symbol": "LUMIA",
+   "pair": "LUMIAUSDT",
+   "tier": "T3",
+   "bybit_symbol": "LUMIAUSDT"
+  },
+  {
+   "symbol": "ARKM",
+   "pair": "ARKMUSDT",
+   "tier": "T3",
+   "bybit_symbol": "ARKMUSDT"
+  },
+  {
+   "symbol": "ENSO",
+   "pair": "ENSOUSDT",
+   "tier": "T3",
+   "bybit_symbol": "ENSOUSDT"
+  },
+  {
+   "symbol": "PARTI",
+   "pair": "PARTIUSDT",
+   "tier": "T3",
+   "bybit_symbol": "PARTIUSDT"
+  },
+  {
+   "symbol": "CATI",
+   "pair": "CATIUSDT",
+   "tier": "T3",
+   "bybit_symbol": "CATIUSDT"
+  },
+  {
+   "symbol": "ZEN",
+   "pair": "ZENUSDT",
+   "tier": "T2",
+   "bybit_symbol": "ZENUSDT"
+  },
+  {
+   "symbol": "SYRUP",
+   "pair": "SYRUPUSDT",
+   "tier": "T3",
+   "bybit_symbol": "SYRUPUSDT"
+  },
+  {
+   "symbol": "PORTAL",
+   "pair": "PORTALUSDT",
+   "tier": "T2",
+   "bybit_symbol": "PORTALUSDT"
+  },
+  {
+   "symbol": "BABY",
+   "pair": "BABYUSDT",
+   "tier": "T2",
+   "bybit_symbol": "BABYUSDT"
+  }
+ ]
+}

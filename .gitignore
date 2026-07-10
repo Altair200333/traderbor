@@ -138,7 +138,19 @@ ui-tests/playwright-report
 ui-tests/.yarn/*
 ui-tests/.pnp.*
 .env
+.env.*
+!.env.example
+!bot/.env.example
 .venv/
+
+# bot runtime state (VPS/dev only — never committed)
+/data/
+bot/data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+bot.log*
+bot.lock
 agents-v2/charts/
 agents-v2/artifacts/
 agents-v2/data/

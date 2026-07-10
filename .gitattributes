@@ -1,2 +1,7 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# bot runs on Linux prod — guard CRLF from Windows dev
+*.py text eol=lf
+*.sh text eol=lf
+bot/deploy/bot.service text eol=lf
